@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "enabled": true,
+    "events": {
+      "PostToolUse": [
+        {
+          "matcher": "Edit|Write",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"${ZCODE_PROJECT_DIR}/scripts/hook-runner.js\" post-tool-use",
+              "timeoutMs": 300000,
+              "statusMessage": "增量质量检查(格式化/规范/安全)"
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"${ZCODE_PROJECT_DIR}/scripts/hook-runner.js\" stop",
+              "timeoutMs": 300000,
+              "statusMessage": "回合聚合质量复查"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

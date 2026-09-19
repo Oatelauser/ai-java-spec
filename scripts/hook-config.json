@@ -1,0 +1,29 @@
+{
+  "javaLanguageLevel": "",
+  "formatter": {
+    "enabled": true,
+    "tool": "google-java-format",
+    "version": "1.17.0",
+    "style": "aosp",
+    "autoFix": true
+  },
+  "convention": {
+    "enabled": true,
+    "tool": "pmd",
+    "version": "7.9.0",
+    "rulesets": "rulesets/java/quickstart.xml",
+    "p3cVersion": ""
+  },
+  "security": {
+    "enabled": true,
+    "rulesets": "category/java/security.xml"
+  },
+  "deepScan": {
+    "enabled": false,
+    "buildTool": "auto",
+    "spotbugsVersion": "4.8.6",
+    "findsecbugsVersion": "1.13.0",
+    "effort": "Max",
+    "threshold": "Medium"
+  }
+}

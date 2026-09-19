@@ -2,6 +2,7 @@
 
 > 资料文件。新建/接手 Maven 项目时按本文配置;修改 Java 代码后按"AI 执行约定"运行检查。
 > 三类检查统一绑在 `verify` 阶段,一条 `mvn -DskipTests verify` 全部触发。
+> 本文是**交付门禁**(全量);编辑期的秒级增量反馈由项目级 hook 承担(见第 5 节),两者互补。
 > 版本号为 2026-09 的参考值,初始化时用 `mvn versions:display-plugin-updates` 校准;
 > **唯一不许升级的是 maven-pmd-plugin(必须钉在 3.21.x,原因见下)**。
 
@@ -166,3 +167,23 @@ dependency-check。两个互补,都要。
 3. 豁免必须精准:PMD/SpotBugs 按规则或文件排除,并在豁免处注明原因(对应
    AGENTS.md 的 Rationale-Oriented 注释要求)。
 4. 改的是单模块就只跑该模块(见第 0 节),不要无差别全量构建拖慢迭代。
+
+## 5. 编辑期增量检查:项目级 hook(与 verify 门禁互补)
+
+本模板自带一套**项目级 ZCode hook**(`.zcode/config.json` + `scripts/`,详细用法见
+[scripts/README.md](../scripts/README.md)),在 AI 编辑 `.java` 的当下就做秒级增量检查,
+不必等全量 verify:
+
+- 触发:`PostToolUse`(Edit|Write)只查刚编辑的单个文件;`Stop` 聚合本回合改动复查兜底。
+- 检查:格式化 google-java-format(`--aosp`,可自动修复)+ PMD 规范 + PMD security 分类,
+  全部 CLI 直调不起 Maven;可选 Stop 层 SpotBugs 深度扫描(默认关)。
+- 通用性:工具版本/规则集/开关全在 `scripts/hook-config.json`,换版本改配置不改脚本;
+  `javaLanguageLevel` 控制解析语言级别,工具 JVM(JAVA_HOME,JDK 11+)与项目 JDK 解耦。
+- 新项目传导:`bash <模板>/scripts/init-java-project.sh /path/to/新项目`,或直接复制
+  `.zcode/` + `scripts/` 两个目录,用 ZCode 打开即生效。
+
+与 pom 门禁的关系:**hook 是编辑期反馈,verify/CI 是最终门禁**,两者规则集可以不同——
+hook 默认用 PMD 7 quickstart(现代、新语法友好),pom 门禁用 p3c(严格对齐阿里手册);
+想统一为阿里规约,把 `scripts/hook-config.pmd6-p3c.json` 的内容覆盖到 `hook-config.json`
+(p3c 2.1.1 只兼容 PMD 6,约束见第 1 节)。已知取舍:google-java-format 风格固定
+(4 空格/100 列),与手册 120 列不同;需要完全一致时以 pom 里的 Spotless 为准。
