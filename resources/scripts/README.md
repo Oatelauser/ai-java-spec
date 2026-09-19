@@ -17,25 +17,24 @@
 
 ## 组成
 
-```
-.zcode/config.json          ZCode hook 挂载(项目级,不碰全局 ~/.zcode)
-scripts/hook-runner.js      统一入口(node,零第三方依赖)
-scripts/hook-config.json    所有开关/版本/规则集 —— 换工具版本只改这里
-scripts/hook-config.pmd6-p3c.json  阿里 p3c 规约预设(想严格对齐阿里手册时复制覆盖)
-scripts/init-java-project.sh       把上述资产安装到新项目
-.tools/                     工具下载缓存(git ignore,首次运行自动创建)
-```
+本目录(`scripts/`)是模板 `resources/` 资产的一部分。`resources/` 是**预制好的一整套**,内容如下,整体拷贝到新项目根即完整可用:
 
-## 新项目如何获得约束
-
-```bash
-bash <模板>/scripts/init-java-project.sh /path/to/新项目
-# 推荐立刻预热:提前把工具下载到 .tools/,之后 hook 检查不再联网、首跑不卡
-cd /path/to/新项目 && node scripts/hook-runner.js warmup
-# 然后用 ZCode 打开新项目目录即可;或手动复制 .zcode/ + scripts/ 两个目录
+```
+resources/
+  .zcode/config.json   ZCode hook 挂载(项目级,不碰全局 ~/.zcode;已预制好相对路径)
+  AGENTS.md            新项目的全局工作约定
+  docs/                知识文档(质量工具/发布流程/编码准则等)
+  scripts/             本目录:hook-runner.js + hook-config.json + p3c 预设 + install.js(兜底安装器)
+.tools/                工具下载缓存(首次运行自动创建并写入 .gitignore)
 ```
 
-脚本通过 `${ZCODE_PROJECT_DIR}` 相对寻址,复制到任何目录都能用。
+## 新项目如何获得约束(拷贝即用,无需初始化)
+
+**首选通道(本地/云端/git 通用)**:把 `resources/` 里的**全部文件和文件夹**(包括隐藏的 `.zcode/`)拷贝/上传到目标项目根目录,重开 ZCode 会话加载 hook,完成。可选预热:`node scripts/hook-runner.js warmup`(提前下载约 70MB 工具,之后检查不联网)。
+
+**兜底通道(模板侧执行)**:缺件或想一条命令自动补齐时,`node <模板>/resources/scripts/install.js <目标项目根>`(merge 拷贝,不删目标已有文件;install.js 自身不下发,重装回模板跑)。
+
+**判断口径(写给 AI)**:目标项目根存在 `.zcode/config.json` 且其中引用 `scripts/hook-runner.js` → 资产已就位;缺什么就从模板 `resources/` 拷什么,或整体跑一遍模板侧的 `install.js`。
 
 ## 配置说明(scripts/hook-config.json)
 

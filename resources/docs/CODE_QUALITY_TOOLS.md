@@ -179,8 +179,8 @@ dependency-check。两个互补,都要。
   全部 CLI 直调不起 Maven;可选 Stop 层 SpotBugs 深度扫描(默认关)。
 - 通用性:工具版本/规则集/开关全在 `scripts/hook-config.json`,换版本改配置不改脚本;
   `javaLanguageLevel` 控制解析语言级别,工具 JVM(JAVA_HOME,JDK 11+)与项目 JDK 解耦。
-- 新项目传导:`bash <模板>/scripts/init-java-project.sh /path/to/新项目`,或直接复制
-  `.zcode/` + `scripts/` 两个目录,用 ZCode 打开即生效。
+- 新项目传导:把模板 `resources/` 的全部内容(含 `.zcode/`、`AGENTS.md`、`docs/`、`scripts/`)
+  整体拷贝到新项目根目录,预制即用、无需初始化;缺件时兜底跑 `node <模板>/resources/scripts/install.js <目标项目根>`。
 
 与 pom 门禁的关系:**hook 是编辑期反馈,verify/CI 是最终门禁**,两者规则集可以不同——
 hook 默认用 PMD 7 quickstart(现代、新语法友好),pom 门禁用 p3c(严格对齐阿里手册);

@@ -59,6 +59,7 @@ async function main() {
 // 预热:只做工具下载/解压,不检查任何文件。init 新项目后手动跑一次,
 // 把首跑约 70MB 的下载成本从"第一次编辑"挪到"项目初始化",下载问题也能当场暴露。
 async function handleWarmup() {
+  ensureGitignoreIgnoresTools();
   if (cfg.formatter && cfg.formatter.enabled) {
     const jar = await ensureTool(
       path.join(TOOLS_DIR, 'google-java-format', `gjf-${cfg.formatter.version}.jar`),
@@ -88,6 +89,7 @@ async function handlePostToolUse() {
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.appendFileSync(QUEUE_FILE, normalizeSlashes(file) + '\n');
+  ensureGitignoreIgnoresTools();
 
   return report(await checkFiles([path.resolve(ROOT, file)], { deepScan: false }), '编辑后单文件增量检查');
 }
@@ -95,6 +97,7 @@ async function handlePostToolUse() {
 async function handleStop() {
   const files = collectTouchedFiles();
   if (files.length === 0) return 0;
+  ensureGitignoreIgnoresTools();
 
   const result = await checkFiles(files, { deepScan: cfg.deepScan && cfg.deepScan.enabled });
   clearQueue();
@@ -437,7 +440,10 @@ function download(url, dest, redirectsLeft) {
       },
       reject,
     );
-    req.setTimeout(120000, () => req.destroy(new Error(`下载超时 ${url}`)));
+    // 连接阶段 20 秒快速失败(受限网络下死节点常见,死等 120 秒会把 hook 冷启动预算拖爆);
+    // 拿到响应后放宽为 120 秒空闲超时,慢速但持续流动的下载不受影响
+    req.setTimeout(20000, () => req.destroy(new Error(`连接超时 ${url}`)));
+    req.on('response', () => req.setTimeout(120000, () => req.destroy(new Error(`下载超时 ${url}`))));
   });
 }
 
@@ -576,6 +582,17 @@ function readStdinJson() {
 
 function isIgnoredPath(p) {
   return /(^|[\\/])(target|build|node_modules|\.tools|\.git)([\\/]|$)/.test(normalizeSlashes(p));
+}
+
+// 纯拷贝安装(preferred 通道)没有任何后续动作,.tools/ 的 git 忽略必须由 runner 首次运行时自己补上
+function ensureGitignoreIgnoresTools() {
+  try {
+    const file = path.join(ROOT, '.gitignore');
+    if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').split(/\r?\n/).includes('.tools/')) return;
+    fs.appendFileSync(file, `${fs.existsSync(file) ? '\n' : ''}# quality-hook 工具下载缓存\n.tools/\n`);
+  } catch {
+    // 只读文件系统等场景静默跳过,不影响检查主流程
+  }
 }
 
 function normalizeSlashes(p) {
