@@ -204,11 +204,22 @@ async function checkFiles(files, opts) {
   // 格式化重写只允许发生在回合末(opts.format):编辑中途重写会作废 agent 缓存、误删中间态 import
   if (opts.format && cfg.formatter && cfg.formatter.enabled) await runFormatter(files, result);
   if ((cfg.convention && cfg.convention.enabled) || (cfg.security && cfg.security.enabled)) {
-    await runPmd(files, result);
+    // PostToolUse 同理容忍"未使用类"中间态:单次编辑看不到整个回合的意图,Stop 全量兜底
+    const suppress = opts.format ? [] : ((cfg.postToolUse && cfg.postToolUse.suppressRules) || EDIT_TIME_SUPPRESSED_RULES);
+    await runPmd(files, result, suppress);
   }
   if (opts.deepScan) await runDeepScan(result);
   return result;
 }
+
+// 编辑期默认容忍的规则:声明的 import/字段/变量常在"下一次编辑"才被使用
+const EDIT_TIME_SUPPRESSED_RULES = [
+  'UnnecessaryImport',
+  'UnusedPrivateField',
+  'UnusedLocalVariable',
+  'UnusedPrivateMethod',
+  'UnusedFormalParameter',
+];
 
 async function runFormatter(files, result) {
   const jar = await ensureTool(
@@ -244,7 +255,7 @@ async function runFormatter(files, result) {
   }
 }
 
-async function runPmd(files, result) {
+async function runPmd(files, result, suppressedRules = []) {
   const conv = cfg.convention || {};
   const rulesets = [conv.enabled && conv.rulesets, cfg.security && cfg.security.enabled && cfg.security.rulesets]
     .filter(Boolean)
@@ -270,8 +281,11 @@ async function runPmd(files, result) {
   if (r.status === 0) return;
   if (r.status === 4) {
     const hits = (r.stdout || '').split(/\r?\n/).filter(l => /^\S+:\d+:\s+\S/.test(l));
-    result.violations.push(...hits.slice(0, 12).map(l => `[PMD] ${l.trim().slice(0, 200)}`));
-    if (hits.length > 12) result.violations.push(`[PMD] ...另有 ${hits.length - 12} 条违规(规则集: ${rulesets})`);
+    const visible = suppressedRules.length > 0
+      ? hits.filter(l => !suppressedRules.some(rule => new RegExp(`(?:^|\\s)${rule}:\\s`).test(l)))
+      : hits;
+    result.violations.push(...visible.slice(0, 12).map(l => `[PMD] ${l.trim().slice(0, 200)}`));
+    if (visible.length > 12) result.violations.push(`[PMD] ...另有 ${visible.length - 12} 条违规(规则集: ${rulesets})`);
   } else {
     result.notes.push(`PMD 执行异常 exit=${r.status}: ${brief(r.stderr || r.stdout)}`);
   }

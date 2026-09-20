@@ -68,6 +68,7 @@
   - 防旁路:检测 heredoc/重定向/`sed -i`/`tee` 直接写改 `.java`,deny 并引导改用 Write/Edit 进入扫描链路;
   - Git 门:`git commit/push` 前对改动的 `.java` 跑 PMD,有未修复违规即阻断;改动文件超过 `performance.gitGateMaxFiles`(默认 20)时,`open` 模式跳过检查留痕放行、`strict` 模式拒绝。
 - **finding 台账**(Stop 复查去重):同一条违规(文件+行+规则)只完整回灌一次,之后只计数提示("另有 N 条此前已报告");本轮检查过但未再出现的判定为已修复,追加到不可覆盖的 `.tools/hook-state/findings-history.log`。台账按"行号"记键,格式化导致行号漂移可能重新完整报告一次,属已知取舍。
+- **编辑期容忍"未使用类"中间态**:PostToolUse 对 `UnnecessaryImport/UnusedPrivateField/UnusedLocalVariable/UnusedPrivateMethod/UnusedFormalParameter` 静默(单次编辑看不到整个回合的意图——"先加声明、下次编辑才使用"是合法节奏);Stop 全量复查兜底,回合结束时真正没人用的会被抓到。
 
 相关配置(`scripts/hook-config.json`):`failureMode`(open/strict)、`feedback`(important/quiet)、`performance.gitGateMaxFiles`。
 

@@ -17,7 +17,7 @@
 
 - `PreToolUse`(Edit\|Write):**确定性高危**(硬编码密钥/口令/云厂商 Key)写入前 deny 并回灌修复建议——只有这类才阻断,规范类仍走事后回灌(分级响应)。
 - `PreToolUse`(Bash):拦"用 heredoc/重定向/sed -i/tee 直接写改 `.java`"的旁路,引导改用 Write/Edit 进入扫描链路;`git commit/push` 前对改动的 `.java` 跑 PMD,有未修复违规即阻断(超过 `performance.gitGateMaxFiles` 个文件时按 `failureMode` 降级)。
-- `PostToolUse`(matcher `Edit|Write`):对刚写的单个 `.java` 做**只读**检查(PMD 违规秒级回灌;不重写文件)。
+- `PostToolUse`(matcher `Edit|Write`):对刚写的单个 `.java` 做**只读**检查(PMD 违规秒级回灌;不重写文件;"未使用类"规则编辑期静默,Stop 兜底)。
 - `Stop`:回合末统一做两件事——格式化重写 + 聚合复查;复查经 **finding 台账**去重(同一条违规只完整回灌一次,未变化的只计数提示;修复的写入不可覆盖历史 `.tools/hook-state/findings-history.log`)。
 - 违规或发生自动格式化 → 以 additionalContext 注入回灌;干净 → 静默;写入前高危与门禁命中 → deny 阻断。
 
@@ -34,6 +34,6 @@ scripts/hook-config.json  全部开关/版本/规则集——改配置不改代�
 
 ## 常见问题
 
-- **hook 没触发**:确认 `.zcode/config.json` 里 `hooks.enabled: true`;配置文件 hook 需要重开会话加载;执行记录可在 ZCode 日志里核对。
+- **hook 没触发(新会话首要怀疑:工作区信任门)**:项目级 hooks **每个新会话都需要在客户端批准"工作区 hook 信任"**(会话开始或首次触发时弹出的信任请求,含全部挂载项);未批准时 hooks **整场静默封锁**,AI 与用户均无感知——代码照常落盘但零检查。排查:在 ZCode 日志 `~/.zcode/cli/log/zcode-<日期>.jsonl` 中搜 `pending_trust`,命中即未信任。其次才查 `hooks.enabled: true` 与"是否重开会话加载了配置"。
 - **hook 是编辑期反馈,不是最终门禁**:发布/交付前的 `mvn verify` / CI 全量检查仍按 `docs/CODE_QUALITY_TOOLS.md` 执行,两者互补。
 - 其余(下载、版本、代理、离线)见开头指路的手册。
