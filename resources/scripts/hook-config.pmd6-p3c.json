@@ -27,5 +27,8 @@
     "findsecbugsVersion": "1.13.0",
     "effort": "Max",
     "threshold": "Medium"
-  }
+  },
+  "performance": { "gitGateMaxFiles": 20 },
+  "failureMode": "open",
+  "feedback": "important"
 }

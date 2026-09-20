@@ -102,6 +102,8 @@ Coding Guidelines,人工在编辑器里用,**AI 无法感知它**,对 AI 只有 
 - 运行时要求 JDK 11+。
 - 团队若要和 IDEA 格式化完全一致,可改用 `<eclipse>` formatter + IDEA 导出的
   profile 文件,配置成本高一些。
+- 与编辑期 hook 并存:hook 直调的 google-java-format 是 4 空格/100 列,与 palantir 的
+  120 列不同,双层并存的重排取舍与消振办法见第 5 节。
 - 日常开发:**写完代码先 `mvn spotless:apply` 自动格式化**,`check` 留给 verify/CI。
 
 ## 3. 安全检查:SpotBugs(+FindSecBugs)与 OWASP dependency-check
@@ -170,20 +172,17 @@ dependency-check。两个互补,都要。
 
 ## 5. 编辑期增量检查:项目级 hook(与 verify 门禁互补)
 
-本模板自带一套**项目级 ZCode hook**(`.zcode/config.json` + `scripts/`,详细用法见
-[scripts/README.md](../scripts/README.md)),在 AI 编辑 `.java` 的当下就做秒级增量检查,
-不必等全量 verify:
-
-- 触发:`PostToolUse`(Edit|Write)只查刚编辑的单个文件;`Stop` 聚合本回合改动复查兜底。
-- 检查:格式化 google-java-format(`--aosp`,可自动修复)+ PMD 规范 + PMD security 分类,
-  全部 CLI 直调不起 Maven;可选 Stop 层 SpotBugs 深度扫描(默认关)。
-- 通用性:工具版本/规则集/开关全在 `scripts/hook-config.json`,换版本改配置不改脚本;
-  `javaLanguageLevel` 控制解析语言级别,工具 JVM(JAVA_HOME,JDK 11+)与项目 JDK 解耦。
-- 新项目传导:把模板 `resources/` 的全部内容(含 `.zcode/`、`AGENTS.md`、`docs/`、`scripts/`)
-  整体拷贝到新项目根目录,预制即用、无需初始化;缺件时兜底跑 `node <模板>/resources/scripts/install.js <目标项目根>`。
+本项目自带一套**项目级 ZCode hook**,在 AI 编辑 `.java` 的当下做秒级增量检查,不必等
+全量 verify。机制、配置、升级与排障见 [scripts/README.md](../scripts/README.md) 与
+[QUALITY_HOOK_GUIDE.md](QUALITY_HOOK_GUIDE.md)。
 
 与 pom 门禁的关系:**hook 是编辑期反馈,verify/CI 是最终门禁**,两者规则集可以不同——
 hook 默认用 PMD 7 quickstart(现代、新语法友好),pom 门禁用 p3c(严格对齐阿里手册);
-想统一为阿里规约,把 `scripts/hook-config.pmd6-p3c.json` 的内容覆盖到 `hook-config.json`
-(p3c 2.1.1 只兼容 PMD 6,约束见第 1 节)。已知取舍:google-java-format 风格固定
-(4 空格/100 列),与手册 120 列不同;需要完全一致时以 pom 里的 Spotless 为准。
+想统一为阿里规约,按 QUALITY_HOOK_GUIDE 第 3 节切换(p3c 2.1.1 只兼容 PMD 6,约束见第 1 节)。
+
+**格式化的双层取舍**:hook 用 google-java-format(4 空格/100 列,风格固定),本手册
+第 2 节的 Spotless 用 palantir(4 空格/120 列)。两层风格不同,同时启用时以 pom 的
+Spotless 为最终裁决——交付前 `mvn spotless:apply` 会把代码重排为 120 列,hook 在下次
+编辑又按 100 列自动重排,属已知代价。不能接受重排的项目二选一:关闭 hook 的
+`formatter.enabled`,或把第 2 节 Spotless 改配 `<googleJavaFormat><style>AOSP</style></googleJavaFormat>`
+与 hook 对齐(消振,代价是放弃 120 列、偏离手册列宽条款)。

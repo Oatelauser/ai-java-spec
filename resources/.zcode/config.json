@@ -2,6 +2,30 @@
   "hooks": {
     "enabled": true,
     "events": {
+      "PreToolUse": [
+        {
+          "matcher": "Edit|Write",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"${ZCODE_PROJECT_DIR}/scripts/hook-runner.js\" pre-tool-use",
+              "timeoutMs": 10000,
+              "statusMessage": "写入前高危检查(密钥/凭据)"
+            }
+          ]
+        },
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"${ZCODE_PROJECT_DIR}/scripts/hook-runner.js\" bash-gate",
+              "timeoutMs": 180000,
+              "statusMessage": "命令门禁(防旁路 / Git 提交门)"
+            }
+          ]
+        }
+      ],
       "PostToolUse": [
         {
           "matcher": "Edit|Write",
@@ -10,7 +34,7 @@
               "type": "command",
               "command": "node \"${ZCODE_PROJECT_DIR}/scripts/hook-runner.js\" post-tool-use",
               "timeoutMs": 300000,
-              "statusMessage": "增量质量检查(格式化/规范/安全)"
+              "statusMessage": "增量质量检查(规范/安全)"
             }
           ]
         }

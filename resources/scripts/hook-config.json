@@ -3,14 +3,14 @@
   "formatter": {
     "enabled": true,
     "tool": "google-java-format",
-    "version": "1.17.0",
+    "version": "1.36.1",
     "style": "aosp",
     "autoFix": true
   },
   "convention": {
     "enabled": true,
     "tool": "pmd",
-    "version": "7.9.0",
+    "version": "7.27.0",
     "rulesets": "rulesets/java/quickstart.xml",
     "p3cVersion": ""
   },
@@ -25,5 +25,10 @@
     "findsecbugsVersion": "1.13.0",
     "effort": "Max",
     "threshold": "Medium"
-  }
+  },
+  "performance": {
+    "gitGateMaxFiles": 20
+  },
+  "failureMode": "open",
+  "feedback": "important"
 }
