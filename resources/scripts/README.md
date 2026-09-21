@@ -34,6 +34,6 @@ scripts/hook-config.json  全部开关/版本/规则集——改配置不改代�
 
 ## 常见问题
 
-- **hook 没触发(按此顺序排查)**:① **工作区信任**——项目 hooks 首次使用需在客户端批准一次,批准**持久化**于 `~/.zcode/security/workspace-hook-trust-v1.json`(全局记录,一次批准长期有效,换会话/重启客户端不用重批);注意信任按 **hook 声明摘要**绑定——**修改 `.zcode/config.json` 里的 hook 命令/事件/matcher 会使摘要失配、要求重新批准**(改 `scripts/hook-config.json` 的工具配置**不影响**信任)。错过的信任弹窗不会重弹,未批准期间 hooks 整场静默封锁(代码照常落盘但零检查)——用 ZCode 日志 `~/.zcode/cli/log/zcode-<日期>.jsonl` 搜 `pending_trust` 判定,或直接看信任文件里有没有本项目的记录。② `hooks.enabled: true`。③ 配置是否被会话加载(重开会话)。④ **一键自检**:`node scripts/selftest.js` 对本机安装做 37 项全量回归(写入前门/命令门/编辑期检查/Stop 格式化与台账/输出协议),约 2-4 分钟,会临时建删 git 仓库与测试文件并自清理——全 PASS 即整条链路健康,FAIL 输出即为定位线索。
+- **hook 没触发(按此顺序排查)**:① 用**探针或 selftest 判定死活**——日志里的 `pending_trust` 是噪音信号(hooks 正常工作时也会刷),不能作为封锁依据;最可靠的是发一个违规写入看有无 `[quality-hook]` 回灌,或跑 `node scripts/selftest.js`(37 项全量回归,约 2-4 分钟,自建自删 git 仓库与测试文件)。② **恢复手册**(hooks 确认全哑时):备份并删除 `~/.zcode/security/workspace-hook-trust-v1.json` 中本项目的记录 → 完全重启客户端(不是只开新会话) → 新会话中批准信任弹窗(4 项)——记录写入与同会话生效已被两次实证。③ 信任按 **hook 声明摘要**绑定:改 `.zcode/config.json` 的命令/事件/matcher 需重批(改 `scripts/hook-config.json` 不影响)。④ `hooks.enabled: true` 与配置加载。
 - **hook 是编辑期反馈,不是最终门禁**:发布/交付前的 `mvn verify` / CI 全量检查仍按 `docs/CODE_QUALITY_TOOLS.md` 执行,两者互补。
 - 其余(下载、版本、代理、离线)见开头指路的手册。
