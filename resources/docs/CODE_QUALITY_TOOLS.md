@@ -157,8 +157,9 @@ dependency-check。两个互补,都要。
 
 ## 4. AI 执行约定(写给 AI 的指令)
 
-1. **新建项目 / 接手未配置的项目**:把本文三个插件配进根 pom(全局),commit 前跑
-   `mvn -DskipTests verify` 确认门禁生效。
+1. **新建项目 / 接手未配置的项目**:把本文三个插件配进根 pom(全局)。配置时机为"首个交付前到位"即可,
+   不必先于写码——新项目可直接先写功能(hook 在编辑期兜底),交付前补齐并跑 `mvn -DskipTests verify`
+   确认门禁生效。
 2. **日常修改 Java 代码后,交付前必须**:
    ```bash
    mvn spotless:apply
