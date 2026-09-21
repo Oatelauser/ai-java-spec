@@ -72,7 +72,7 @@
 
 相关配置(`scripts/hook-config.json`):`failureMode`(open/strict)、`feedback`(important/quiet)、`performance.gitGateMaxFiles`。
 
-## 7. 接入已有代码的项目(存量工程)
+## 6. 接入已有代码的项目(存量工程)
 
 机制上天然适配存量项目:**编辑期只查改动的文件**(改哪治哪,不会对全库扫违规);但接入时注意四点:
 
@@ -82,7 +82,7 @@
 4. **Stop 复查上限**:git 脏文件很多时,回合末复查按 `performance.stopMaxFiles`(默认 30)截断,超额部分标注 partial/INCONCLUSIVE——大仓库可调大或分批提交。
 5. **交付门禁照旧**:pom 里没配三类检查的,按 `docs/CODE_QUALITY_TOOLS.md` 在首个交付前补齐。
 
-## 6. 已知取舍与边界
+## 7. 已知取舍与边界
 
 - **格式化双层取舍**:本 hook 用 google-java-format(4 空格/100 列),pom 侧 Spotless
   (palantir,120 列)与它风格不同——并存时的重排代价与两种消振办法(关
