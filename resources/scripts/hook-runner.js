@@ -123,9 +123,9 @@ async function handleBashGate() {
   const cmd = readStdinJson().tool_input?.command;
   if (typeof cmd !== 'string' || !cmd.trim()) return 0;
 
-  const bypass = detectBashWriteBypass(cmd);
+  const bypass = detectShellWriteBypass(cmd);
   if (bypass) {
-    return deny(`[quality-hook] 命令门禁:检测到用 Bash 直接写/改 .java(${bypass}),会绕过质量扫描。\n请改用 Write/Edit 工具写入源码,以进入规范/安全检查链路。`);
+    return deny(`[quality-hook] 命令门禁:检测到用 shell 命令直接写/改 .java(${bypass}),会绕过质量扫描。\n请改用 Write/Edit 工具写入源码,以进入规范/安全检查链路。`);
   }
   // git 必须处于命令位(行首/操作符之后),且 commit/push 是子命令位——
   // 否则 "echo git commit"、"git log --grep commit" 这类文本会被误触发;
@@ -134,12 +134,16 @@ async function handleBashGate() {
   return 0;
 }
 
-function detectBashWriteBypass(cmd) {
+function detectShellWriteBypass(cmd) {
   if (!/\S*\.java\b/.test(cmd)) return null;
   // (?![.\w]):排除 .java.txt/.java.bak 等以 .java 为前缀的非 Java 目标
   if (/>\s*\S*\.java(?![.\w])/.test(cmd)) return '重定向写入 .java';
   if (/\bsed\b[^&|;\n]*\s-i/.test(cmd)) return 'sed 就地修改 .java';
   if (/\btee\b[^&|;\n]*\S*\.java(?![.\w])/.test(cmd)) return 'tee 写入 .java';
+  // PowerShell 宿主(Claude Code Windows 的 shell 工具)的写入形态;
+  // cmdlet 后要求空白+可选参数再接 .java,避免把"读一个名叫 out-file.java 的文件"误判
+  if (/\b(?:out-file|set-content|add-content)\s+(?:-[a-z]+\s+)*\S*\.java(?![.\w])/i.test(cmd)) return 'PowerShell cmdlet 写入 .java';
+  if (/\bwriteall(?:text|lines|bytes)\b[^&|;\n]*\.java/i.test(cmd)) return '.NET WriteAll* 写入 .java';
   return null;
 }
 
@@ -173,9 +177,22 @@ function gitGate() {
   });
 }
 
-// PreToolUse 的拒绝:exit 2 即 deny(阻断语义可靠);reason 同时以 stdout JSON 给出,
-// 若宿主 schema 不认该字段,阻断依然生效,文案丢失可在实测后校准
+// PreToolUse 的拒绝,按宿主分派输出形状(两宿主均真机校准):
+// ZCode:exit 2 + {decision:'deny'}(阻断可靠);
+// Claude Code:顶层 decision 只收 approve|block,"deny" 必须走 hookSpecificOutput.permissionDecision;
+// legacy 形状会被其 schema 校验整体拒绝并 fail-open 放行(v2.1.278 真机实测:命令照跑、文件落盘),
+// 故该宿主 exit 0 仅凭 JSON 表意
 function deny(reason) {
+  if (!process.env.ZCODE_PROJECT_DIR && process.env.CLAUDE_PROJECT_DIR) {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: reason,
+      },
+    }));
+    return 0;
+  }
   process.stdout.write(JSON.stringify({ decision: 'deny', reason }));
   return 2;
 }

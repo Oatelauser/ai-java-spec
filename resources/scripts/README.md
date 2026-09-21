@@ -9,7 +9,7 @@
 | 检查 | 工具 | 时机 | 增量方式 |
 |---|---|---|---|
 | **写入前高危拦截** | 密钥/凭据正则检测(毫秒级) | 每次 Edit/Write 一个 `.java` **之前** | 命中即 deny,坏代码不落盘 |
-| **命令门禁** | 防旁路检测 + PMD | 每次 Bash **之前** | 拦"Bash 直写 .java";`git commit/push` 前复查改动文件 |
+| **命令门禁** | 防旁路检测 + PMD | 每次 Bash/PowerShell **之前** | 拦"shell 直写 .java";`git commit/push` 前复查改动文件 |
 | 代码规范 | PMD(默认 7.x quickstart;可切 6.55 + p3c 阿里规约) | 每次 Edit/Write 一个 `.java` 后 | 只查该文件,CLI 直调不走 Maven |
 | 代码安全 | PMD `category/java/security.xml`(浅层源码检查) | 同上 | 与规范同一条链路 |
 | 格式化 | google-java-format(`--aosp`,4 空格) | **回合结束(Stop)统一修复** | 回合内不重写文件,编辑缓存不失效 |
@@ -34,7 +34,7 @@ scripts/hook-config.json  全部开关/版本/规则集——改配置不改代�
 
 ## 常见问题
 
-- **hook 没触发(按此顺序排查,ZCode 宿主)**:① 用**探针或 selftest 判定死活**——日志里的 `pending_trust` 是噪音信号(hooks 正常工作时也会刷),不能作为封锁依据;最可靠的是发一个违规写入看有无 `[quality-hook]` 回灌,或跑 `node scripts/selftest.js`(37 项全量回归,约 2-4 分钟,自建自删 git 仓库与测试文件)。② **恢复手册**(hooks 确认全哑时):备份并删除 `~/.zcode/security/workspace-hook-trust-v1.json` 中本项目的记录 → 完全重启客户端(不是只开新会话) → 新会话中批准信任弹窗(4 项)——记录写入与同会话生效已被两次实证。③ 信任按 **hook 声明摘要**绑定:改 `.zcode/config.json` 的命令/事件/matcher 需重批,且**只重批变更过的声明**(实测仅 matcher 变化时只弹 2 项,未变声明沿用旧批;改 `scripts/hook-config.json` 不影响)。批准后客户端可能把 config 规范化重写(如 `timeoutMs` 毫秒改写为 `timeout` 秒),属正常勿手工改回;重拷 config 即使语义相同也可能再弹窗,批过即恢复。**信任跨会话继承(已实证)**:批准记录按工作区持久保存,新会话(不重启客户端)零弹窗、hook 直接生效,无需每会话重批。④ `hooks.enabled: true` 与配置加载。**Claude Code 宿主**:审核机制不同(无上述信任文件),排查见 docs/QUALITY_HOOK_GUIDE.md 第 8 节。
+- **hook 没触发(按此顺序排查,ZCode 宿主)**:① 用**探针或 selftest 判定死活**——日志里的 `pending_trust` 是噪音信号(hooks 正常工作时也会刷),不能作为封锁依据;最可靠的是发一个违规写入看有无 `[quality-hook]` 回灌,或跑 `node scripts/selftest.js`(41 项全量回归,约 2-4 分钟,自建自删 git 仓库与测试文件)。② **恢复手册**(hooks 确认全哑时):备份并删除 `~/.zcode/security/workspace-hook-trust-v1.json` 中本项目的记录 → 完全重启客户端(不是只开新会话) → 新会话中批准信任弹窗(4 项)——记录写入与同会话生效已被两次实证。③ 信任按 **hook 声明摘要**绑定:改 `.zcode/config.json` 的命令/事件/matcher 需重批,且**只重批变更过的声明**(实测仅 matcher 变化时只弹 2 项,未变声明沿用旧批;改 `scripts/hook-config.json` 不影响)。批准后客户端可能把 config 规范化重写(如 `timeoutMs` 毫秒改写为 `timeout` 秒),属正常勿手工改回;重拷 config 即使语义相同也可能再弹窗,批过即恢复。**信任跨会话继承(已实证)**:批准记录按工作区持久保存,新会话(不重启客户端)零弹窗、hook 直接生效,无需每会话重批。④ `hooks.enabled: true` 与配置加载。**Claude Code 宿主**:审核机制不同(无上述信任文件),排查见 docs/QUALITY_HOOK_GUIDE.md 第 8 节。
 - **回合末文件被改写、却没看到"已自动格式化"提示**:Stop 的格式化动作与提示注入是两回事——ZCode 一次实测中动作生效(文件被改写、台账落盘)而提示未送达模型(详见 docs/QUALITY_HOOK_GUIDE.md 第 8 节)。回合结束后继续编辑前,先重新 Read 被改写的文件,否则 Edit 可能匹配失败。
 - **hook 是编辑期反馈,不是最终门禁**:发布/交付前的 `mvn verify` / CI 全量检查仍按 `docs/CODE_QUALITY_TOOLS.md` 执行,两者互补。
 - 其余(下载、版本、代理、离线)见开头指路的手册。

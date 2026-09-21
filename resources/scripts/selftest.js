@@ -57,13 +57,19 @@ function runCase(id, fn) {
   }
 }
 
+// 按启动宿主忠实模拟:用哪个变量启动 selftest,就以哪个(且仅该)变量调 runner;
+// 否则 Claude 形状永远走不到,deny 宿主分派就测不出来
+const HOST_KEY = process.env.ZCODE_PROJECT_DIR ? 'ZCODE_PROJECT_DIR' : 'CLAUDE_PROJECT_DIR';
+
 // 用规定的 spawnSync 方式调 runner;stdin 传 JSON 字符串,严禁 shell 拼接
 function hook(mode, payload, timeoutMs) {
+  const env = Object.assign({}, process.env, { [HOST_KEY]: LAB });
+  delete env[HOST_KEY === 'ZCODE_PROJECT_DIR' ? 'CLAUDE_PROJECT_DIR' : 'ZCODE_PROJECT_DIR'];
   const res = spawnSync(process.execPath, [RUNNER, mode], {
     input: JSON.stringify(payload === undefined ? {} : payload),
     encoding: 'utf8',
     cwd: LAB,
-    env: Object.assign({}, process.env, { ZCODE_PROJECT_DIR: LAB }),
+    env,
     timeout: timeoutMs || 240000,
   });
   if (res.error) throw new Error(`runner 启动失败: ${res.error.message}`);
@@ -80,7 +86,12 @@ function stdoutJson(res) {
 }
 
 function denyJson(res) {
-  return res.status === 2 ? stdoutJson(res) : undefined;
+  const out = stdoutJson(res);
+  // 两种 deny 形状归一:ZCode=exit2+{decision};Claude=exit0+hookSpecificOutput.permissionDecision
+  if (out && out.hookSpecificOutput && out.hookSpecificOutput.permissionDecision === 'deny') {
+    return { decision: 'deny', reason: out.hookSpecificOutput.permissionDecisionReason || '' };
+  }
+  return res.status === 2 ? out : undefined;
 }
 
 // post/stop 的 stdout:为空,或恰好一个可 JSON.parse 的对象;stderr 必须为空
@@ -355,7 +366,7 @@ function bashCases() {
       const out = denyJson(res);
       const reason = out && out.reason ? out.reason : '';
       const ok = !!out && out.decision === 'deny' && (!need || reason.includes(need));
-      record(id, ok, ok ? `deny exit2(${need || '写 .java 绕过'})` : `status=${res.status} stdout=${(res.stdout || '').slice(0, 150)}`);
+      record(id, ok, ok ? `deny exit=${res.status}(${need || '写 .java 绕过'})` : `status=${res.status} stdout=${(res.stdout || '').slice(0, 150)}`);
     });
   };
 
@@ -363,6 +374,16 @@ function bashCases() {
   denyBy('B2', 'echo x > Foo.java', '命令门禁');
   denyBy('B3', "sed -i 's/a/b/' A.java", 'sed');
   denyBy('B4', 'echo hello | tee B.java', 'tee');
+  denyBy('B12', "Set-Content -Path src/A.java -Value 'public class A {}'", 'PowerShell');
+  denyBy('B13', "echo 'public class X{}' | Out-File src/X.java", 'PowerShell');
+  denyBy('B14', "[IO.File]::WriteAllText('A.java', 'x')", 'WriteAll');
+
+  runCase('B15', () => {
+    const res = hook('bash-gate', { tool_name: 'PowerShell', tool_input: { command: 'Get-Content src/A.java | Out-File out.txt' } });
+    const out = denyJson(res);
+    const ok = !out && res.status === 0;
+    record('B15', ok, ok ? '读 .java 写 .txt 的 PowerShell 管道不误伤(放行)' : `误伤:status=${res.status} stdout=${(res.stdout || '').slice(0, 150)}`);
+  });
 
   runCase('B5', () => {
     const res = hook('bash-gate', { tool_name: 'Bash', tool_input: { command: 'mvn -q test' } });

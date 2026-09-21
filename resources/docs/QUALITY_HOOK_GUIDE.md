@@ -65,7 +65,7 @@
 
 - **写入前高危门**(PreToolUse, Edit|Write):毫秒级正则检测硬编码密钥/口令/云厂商 Key(私钥内容、`password/secret/token= "..."` 赋值、AKIA/sk-/ghp_/xox* 前缀)。命中即 deny,坏代码不落盘,回灌"改用环境变量/配置中心"的修复建议。刻意不用 PMD——写入前门的性能契约是秒级的百分之一。
 - **命令门**(PreToolUse, Bash)两件事:
-  - 防旁路:检测 heredoc/重定向/`sed -i`/`tee` 直接写改 `.java`,deny 并引导改用 Write/Edit 进入扫描链路;
+  - 防旁路:检测 heredoc/重定向/`sed -i`/`tee` 及 PowerShell 的 `Out-File`/`Set-Content`/`Add-Content`/`.NET WriteAll*` 直接写改 `.java`,deny 并引导改用 Write/Edit 进入扫描链路;
   - Git 门:`git commit/push` 前对改动的 `.java` 跑 PMD,有未修复违规即阻断;改动文件超过 `performance.gitGateMaxFiles`(默认 20)时,`open` 模式跳过检查留痕放行、`strict` 模式拒绝。
 - **finding 台账**(Stop 复查去重):同一条违规(文件+行+规则)只完整回灌一次,之后只计数提示("另有 N 条此前已报告");本轮检查过但未再出现的判定为已修复,追加到不可覆盖的 `.tools/hook-state/findings-history.log`。台账按"行号"记键,格式化导致行号漂移可能重新完整报告一次,属已知取舍。
 - **编辑期容忍"未使用类"中间态**:PostToolUse 对 `UnnecessaryImport/UnusedPrivateField/UnusedLocalVariable/UnusedPrivateMethod/UnusedFormalParameter` 静默(单次编辑看不到整个回合的意图——"先加声明、下次编辑才使用"是合法节奏);Stop 全量复查兜底,回合结束时真正没人用的会被抓到。
@@ -102,10 +102,11 @@
 | 配置位置 | `.zcode/config.json`(`hooks.enabled` 总开关) | `.claude/settings.json`(无总开关) |
 | 项目目录变量 | `${ZCODE_PROJECT_DIR}` | `${CLAUDE_PROJECT_DIR}` |
 | 超时单位 | `timeoutMs`(毫秒) | `timeout`(秒) |
+| deny 输出形状 | `{decision:"deny",reason}` + exit 2 | `hookSpecificOutput.permissionDecision:"deny"` + exit 0(顶层 `decision` 仅收 approve/block,legacy 形状会被 schema 校验拒绝并 fail-open) |
 | 首次生效/审核 | 工作区信任弹窗(见 scripts/README FAQ 的恢复手册) | Claude Code 对项目 settings 中的 hooks 有自己的确认提示,机制不同 |
-| matcher 别名 | ApplyPatch→Write/Edit | 另有 MultiEdit 工具(matcher 已含) |
+| matcher 别名 | ApplyPatch→Write/Edit | 另有 MultiEdit 工具(matcher 已含);Windows 的 shell 工具名为 **PowerShell**(无 Bash 工具),命令门 matcher 已含 `Bash\|PowerShell` |
 
-**实测状态(如实)**:ZCode 侧已实证——引擎触发、写入前 deny、PostToolUse 回灌、Stop 的动作链(格式化改写、台账写入、队列清空);**但 Stop 的 additionalContext 提示在一次实测中未注入模型上下文**(文件确被格式化改写,模型却未收到"已自动格式化"提示;单次观测,复测待做)。在结论明确前,不要把"没看到 Stop 提示"当作"文件没被改写"的信号——回合结束后继续编辑前,先重新 Read 相关文件,否则 Edit 可能匹配失败。候选对策(复测确认缺口仍在再实现,避免与正常送达重复打扰):Stop 把"已自动格式化"通知写入 hook-state,由下一次 PostToolUse 在回灌开头转告,绕开 Stop 送达通道。Claude Code 侧协议按其官方文档对齐(decision-reason 与 additionalContext 均为其支持形状),**未做真机验证**——首次在 Claude Code 项目接入后,先跑 `node scripts/selftest.js` + 一个违规探针写入确认回灌,再投入日常使用。
+**实测状态(如实)**:ZCode 侧已实证——引擎触发、写入前 deny、PostToolUse 回灌、Stop 的动作链(格式化改写、台账写入、队列清空);**但 Stop 的 additionalContext 提示在一次实测中未注入模型上下文**(文件确被格式化改写,模型却未收到"已自动格式化"提示;单次观测,复测待做)。在结论明确前,不要把"没看到 Stop 提示"当作"文件没被改写"的信号——回合结束后继续编辑前,先重新 Read 相关文件,否则 Edit 可能匹配失败。候选对策(仅 ZCode 宿主需要;Claude Code 已实证送达,若实现须按宿主区分,避免正常送达时重复打扰):Stop 把"已自动格式化"通知写入 hook-state,由下一次 PostToolUse 在回灌开头转告,绕开 Stop 送达通道。Claude Code 侧**真机已验**(Windows,claude CLI 2.1 无头模式,PowerShell 宿主):PostToolUse 回灌逐字送达模型;Stop additionalContext 以 `hook_additional_context` 注入并**驱动模型续回合**(与 ZCode 相反,送达通道完好);曾发现两层问题并已修复:① Windows Claude Code 无 Bash 工具、shell 为 PowerShell,matcher 未含时防旁路门完全空转(`echo > x.java` 真机落盘)——matcher 增补 `PowerShell` + runner 增补 cmdlet 检测;② 复测又暴露 deny 输出为 legacy 形状,被 v2.1.278 的 schema 校验整体拒绝且 fail-open 放行(deny 分支在该宿主从未真正生效)——deny 已按宿主分派(见上表)。两修后真机复测:两种 PowerShell 旁路均被拦下、拒绝理由送达模型。另注意:PowerShell `>` 重定向写文件自带 UTF-8 BOM。
 
 - **格式化双层取舍**:本 hook 用 google-java-format(4 空格/100 列),pom 侧 Spotless
   (palantir,120 列)与它风格不同——并存时的重排代价与两种消振办法(关
