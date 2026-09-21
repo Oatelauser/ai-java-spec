@@ -68,6 +68,11 @@ function main() {
     // resources/.gitignore 是 warmup 自愈生成的内部文件,不随推送覆盖目标已有的 .gitignore
     // (目标侧的忽略项由下方 ensureGitignore 合并追加)
     if (entry.name === '.gitignore') continue;
+    // 已有自己 AGENTS.md 的项目(存量工程接入)不覆盖——那是项目身份文件;需要模板约定请人工合并
+    if (entry.name === 'AGENTS.md' && fs.existsSync(path.join(target, 'AGENTS.md'))) {
+      console.log('[install] 跳过 AGENTS.md(目标已存在,不覆盖;如需模板约定请自行合并)');
+      continue;
+    }
     copyTree(path.join(ASSETS_ROOT, entry.name), path.join(target, entry.name));
     console.log(`[install] 已安装: ${entry.name}${entry.isDirectory() ? '/' : ''}`);
   }

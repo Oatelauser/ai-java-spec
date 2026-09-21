@@ -191,10 +191,16 @@ async function handleStop() {
   if (files.length === 0) return 0;
   ensureGitignoreIgnoresTools();
 
-  const result = await checkFiles(files, { format: true, deepScan: cfg.deepScan && cfg.deepScan.enabled });
-  applyFindingLedger(result, files);
+  // 存量项目 git 脏文件可能很多,复查设上限防止 Stop 超时(队列文件优先,超额部分如实标注)
+  const cap = (cfg.performance && cfg.performance.stopMaxFiles) || 30;
+  const skipped = Math.max(0, files.length - cap);
+  const checked = skipped > 0 ? files.slice(0, cap) : files;
+
+  const result = await checkFiles(checked, { format: true, deepScan: cfg.deepScan && cfg.deepScan.enabled });
+  if (skipped > 0) result.notes.push(`另有 ${skipped} 个改动文件未复查(超过 performance.stopMaxFiles=${cap},partial/INCONCLUSIVE)`);
+  applyFindingLedger(result, checked);
   clearQueue();
-  return report(result, `回合聚合复查(${files.length} 个 .java)`);
+  return report(result, `回合聚合复查(${checked.length} 个 .java)`);
 }
 
 // ---------------------------------------------------------------- 检查链路
