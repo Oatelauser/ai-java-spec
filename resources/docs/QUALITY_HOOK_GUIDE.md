@@ -93,6 +93,20 @@
 - touched-files 队列无 TTL:Stop 长期不运行时陈旧条目会累积并挤占 `stopMaxFiles` 名额。
 - MultiEdit 工具的 edits[] 数组不经写入前高危检测(PostToolUse/Stop 兜底)。
 
+## 8. 多宿主接入(ZCode 与 Claude Code)
+
+资产自带两份宿主配置,**并存互不干扰**(各宿主只认自己的文件):`.zcode/config.json`(ZCode)与 `.claude/settings.json`(Claude Code),指向同一个 `scripts/hook-runner.js`——runner 自动识别两家的项目目录变量。
+
+| 差异点 | ZCode | Claude Code |
+|---|---|---|
+| 配置位置 | `.zcode/config.json`(`hooks.enabled` 总开关) | `.claude/settings.json`(无总开关) |
+| 项目目录变量 | `${ZCODE_PROJECT_DIR}` | `${CLAUDE_PROJECT_DIR}` |
+| 超时单位 | `timeoutMs`(毫秒) | `timeout`(秒) |
+| 首次生效/审核 | 工作区信任弹窗(见 scripts/README FAQ 的恢复手册) | Claude Code 对项目 settings 中的 hooks 有自己的确认提示,机制不同 |
+| matcher 别名 | ApplyPatch→Write/Edit | 另有 MultiEdit 工具(matcher 已含) |
+
+**实测状态(如实)**:ZCode 侧全链路实证(引擎触发/deny/回灌/Stop/台账);Claude Code 侧协议按其官方文档对齐(decision-reason 与 additionalContext 均为其支持形状),**未做真机验证**——首次在 Claude Code 项目接入后,先跑 `node scripts/selftest.js` + 一个违规探针写入确认回灌,再投入日常使用。
+
 - **格式化双层取舍**:本 hook 用 google-java-format(4 空格/100 列),pom 侧 Spotless
   (palantir,120 列)与它风格不同——并存时的重排代价与两种消振办法(关
   `formatter.enabled` / Spotless 改配 googleJavaFormat AOSP)见

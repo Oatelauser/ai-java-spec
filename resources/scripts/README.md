@@ -34,6 +34,6 @@ scripts/hook-config.json  全部开关/版本/规则集——改配置不改代�
 
 ## 常见问题
 
-- **hook 没触发(按此顺序排查)**:① 用**探针或 selftest 判定死活**——日志里的 `pending_trust` 是噪音信号(hooks 正常工作时也会刷),不能作为封锁依据;最可靠的是发一个违规写入看有无 `[quality-hook]` 回灌,或跑 `node scripts/selftest.js`(37 项全量回归,约 2-4 分钟,自建自删 git 仓库与测试文件)。② **恢复手册**(hooks 确认全哑时):备份并删除 `~/.zcode/security/workspace-hook-trust-v1.json` 中本项目的记录 → 完全重启客户端(不是只开新会话) → 新会话中批准信任弹窗(4 项)——记录写入与同会话生效已被两次实证。③ 信任按 **hook 声明摘要**绑定:改 `.zcode/config.json` 的命令/事件/matcher 需重批(改 `scripts/hook-config.json` 不影响)。④ `hooks.enabled: true` 与配置加载。
+- **hook 没触发(按此顺序排查,ZCode 宿主)**:① 用**探针或 selftest 判定死活**——日志里的 `pending_trust` 是噪音信号(hooks 正常工作时也会刷),不能作为封锁依据;最可靠的是发一个违规写入看有无 `[quality-hook]` 回灌,或跑 `node scripts/selftest.js`(37 项全量回归,约 2-4 分钟,自建自删 git 仓库与测试文件)。② **恢复手册**(hooks 确认全哑时):备份并删除 `~/.zcode/security/workspace-hook-trust-v1.json` 中本项目的记录 → 完全重启客户端(不是只开新会话) → 新会话中批准信任弹窗(4 项)——记录写入与同会话生效已被两次实证。③ 信任按 **hook 声明摘要**绑定:改 `.zcode/config.json` 的命令/事件/matcher 需重批(改 `scripts/hook-config.json` 不影响)。④ `hooks.enabled: true` 与配置加载。**Claude Code 宿主**:审核机制不同(无上述信任文件),排查见 docs/QUALITY_HOOK_GUIDE.md 第 8 节。
 - **hook 是编辑期反馈,不是最终门禁**:发布/交付前的 `mvn verify` / CI 全量检查仍按 `docs/CODE_QUALITY_TOOLS.md` 执行,两者互补。
 - 其余(下载、版本、代理、离线)见开头指路的手册。

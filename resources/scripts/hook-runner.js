@@ -31,9 +31,10 @@ const { spawnSync } = require('child_process');
 // 沙箱/代理环境常设 NODE_TLS_REJECT_UNAUTHORIZED=0,node 会往 stderr 打警告污染 hook 回灌,压掉
 process.removeAllListeners('warning');
 
+// 多宿主:ZCode 用 ZCODE_PROJECT_DIR,Claude Code 用 CLAUDE_PROJECT_DIR,缺省回退脚本自身定位
 const ROOT = process.env.ZCODE_PROJECT_DIR
-  ? path.resolve(process.env.ZCODE_PROJECT_DIR)
-  : path.resolve(__dirname, '..');
+  || process.env.CLAUDE_PROJECT_DIR
+  || path.resolve(__dirname, '..');
 const TOOLS_DIR = path.join(ROOT, '.tools');
 const STATE_DIR = path.join(TOOLS_DIR, 'hook-state');
 const QUEUE_FILE = path.join(STATE_DIR, 'touched-files.txt');

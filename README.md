@@ -7,6 +7,7 @@
 | 项 | 作用 |
 |---|---|
 | `.zcode/config.json` | ZCode 项目级 hook 挂载(编辑期增量质量检查,相对路径已预制好) |
+| `.claude/settings.json` | Claude Code 项目级 hook 挂载(同一 runner,双宿主并存互不干扰) |
 | `AGENTS.md` | 新项目的全局工作约定 |
 | `docs/` | 知识文档(质量工具手册、hook 操作手册、发布流程、编码准则等) |
 | `scripts/` | hook-runner.js + 配置 + install.js |
