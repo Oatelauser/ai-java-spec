@@ -79,7 +79,7 @@
 1. **AGENTS.md 不覆盖**:推送/拷贝到已有项目时,若目标已有自己的 AGENTS.md,安装器会跳过(它是项目身份文件);需要模板的质量约定请把相关条目人工合并进去。
 2. **只拷核心也行**:已有约定的项目可以只拷 `.zcode/` + `scripts/`(+ `.tools/`),不带 AGENTS.md/docs。
 3. **存量改动的首次噪音**:第一次编辑某个老文件时,该文件的历史遗留违规会随回灌出现(增量治理的特性而非误报);台账会去重,修不修按团队节奏。
-4. **Stop 复查上限**:git 脏文件很多时,回合末复查按 `performance.stopMaxFiles`(默认 30)截断,超额部分标注 partial/INCONCLUSIVE——大仓库可调大或分批提交。
+4. **Stop 复查上限**:git 脏文件很多时,回合末复查按 `performance.stopMaxFiles`(默认 30)截断,超额部分标注 partial/INCONCLUSIVE——大仓库可调大或分批提交。**非 git 项目两张网缺一**:无 `.git` 时 git 脏文件网恒空,回合末复查只覆盖本回合经 Write/Edit/MultiEdit 触碰的文件——构建插件、代码生成器等其它途径的重写不进回合末复查(仍由 `mvn verify`/CI 收敛),建议项目 git 化。
 5. **交付门禁照旧**:pom 里没配三类检查的,按 `docs/CODE_QUALITY_TOOLS.md` 在首个交付前补齐。
 
 ## 7. 已知取舍与边界
