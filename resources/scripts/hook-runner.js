@@ -89,7 +89,8 @@ async function handleWarmup() {
 // 刻意用毫秒级正则而非 PMD:写入前门的性能契约是秒级预算的百分之一,重引擎留给 PostToolUse。
 const HIGH_RISK_PATTERNS = [
   { name: '私钥内容', re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/ },
-  { name: '硬编码口令/密钥赋值', re: /\b(?:password|passwd|secret|apiKey|api_key|accessKey|access_key|token)\b[^=\n]{0,20}=\s*"[^"\n]{6,}"/i },
+  // 负向环视排除 !=/>=/==/+= 等复合运算符:比较口令与字面量(if (password != "x"))是合法代码,不是硬编码
+  { name: '硬编码口令/密钥赋值', re: /\b(?:password|passwd|secret|apiKey|api_key|accessKey|access_key|token)\b[^=;\n]{0,20}(?<![=!<>+\-*/%&|^])=(?!=)\s*"[^"\n]{6,}"/i },
   { name: 'AWS AccessKey(AKIA)', re: /\bAKIA[0-9A-Z]{16}\b/ },
   { name: 'OpenAI 风格密钥(sk-)', re: /\bsk-[A-Za-z0-9_-]{20,}\b/ },
   { name: 'GitHub Token(ghp_)', re: /\bghp_[A-Za-z0-9]{30,}\b/ },
@@ -125,16 +126,19 @@ async function handleBashGate() {
   if (bypass) {
     return deny(`[quality-hook] 命令门禁:检测到用 Bash 直接写/改 .java(${bypass}),会绕过质量扫描。\n请改用 Write/Edit 工具写入源码,以进入规范/安全检查链路。`);
   }
-  if (/\bgit\b[^&|;\n]*\b(commit|push)\b/.test(cmd)) return gitGate();
+  // git 必须处于命令位(行首/操作符之后),且 commit/push 是子命令位——
+  // 否则 "echo git commit"、"git log --grep commit" 这类文本会被误触发;
+  // 参数段允许"带值参数"(如 -C dir)出现在子命令之前
+  if (/(?:^|[;&|(`$]\s*)git\s+(?:-[^\s]+(?:\s+[^\s-]\S*)?\s+)*(?:commit|push)\b/.test(cmd)) return gitGate();
   return 0;
 }
 
 function detectBashWriteBypass(cmd) {
   if (!/\S*\.java\b/.test(cmd)) return null;
-  if (/>\s*\S*\.java\b/.test(cmd)) return '重定向写入 .java';
-  if (/<<\s*-?\s*['"]?\w+/.test(cmd)) return 'heredoc 写入 .java';
+  // (?![.\w]):排除 .java.txt/.java.bak 等以 .java 为前缀的非 Java 目标
+  if (/>\s*\S*\.java(?![.\w])/.test(cmd)) return '重定向写入 .java';
   if (/\bsed\b[^&|;\n]*\s-i/.test(cmd)) return 'sed 就地修改 .java';
-  if (/\btee\b[^&|;\n]*\S*\.java\b/.test(cmd)) return 'tee 写入 .java';
+  if (/\btee\b[^&|;\n]*\S*\.java(?![.\w])/.test(cmd)) return 'tee 写入 .java';
   return null;
 }
 
@@ -154,6 +158,11 @@ function gitGate() {
   }
   const result = { violations: [], notes: [], fixed: [] };
   return runPmd(changed, result).then(() => {
+    // notes 必须留痕(stderr 进日志可查);strict 模式下检查未完全就绪按 fail-closed 阻断,兑现 strict 承诺
+    result.notes.forEach(n => console.error(`[quality-hook] ${n}`));
+    if (isStrict() && result.notes.length > 0) {
+      return deny(['[quality-hook] Git 门禁:strict 模式下检查未完全就绪,阻断(fail-closed)', ...result.notes.slice(0, 3)].join('\n'));
+    }
     if (result.violations.length === 0) return 0;
     return deny([
       `[quality-hook] Git 门禁:改动代码存在 ${result.violations.length} 处未修复违规,已阻断提交/推送`,
@@ -446,11 +455,13 @@ function applyFindingLedger(result, checkedFiles) {
 function gitChangedJavaFiles() {
   if (!fs.existsSync(path.join(ROOT, '.git'))) return [];
   try {
-    const r = run('git', ['status', '--porcelain', '--untracked-files=all'], { timeoutMs: 15000 });
+    const r = run('git', ['-c', 'core.quotepath=false', 'status', '--porcelain', '--untracked-files=all'], { timeoutMs: 15000 });
     if (r.status !== 0) return [];
     return (r.stdout || '')
       .split(/\r?\n/)
       .map(l => l.slice(3).trim().replace(/^"|"$/g, ''))
+      // 重命名条目 "old -> new" 取新路径
+      .map(p => p.split(' -> ').pop().trim())
       .filter(p => p.endsWith('.java') && !isIgnoredPath(p))
       .map(p => path.resolve(ROOT, p));
   } catch {
@@ -639,7 +650,13 @@ function download(url, dest, redirectsLeft) {
         const tmp = `${dest}.tmp-${process.pid}`;
         const out = fs.createWriteStream(tmp);
         res.pipe(out);
-        out.on('finish', () => out.close(err => (err ? reject(err) : resolve(renameIntoPlace(tmp, dest)))));
+        res.on('error', reject);
+        out.on('finish', () => out.close(err => {
+          if (err) return reject(err);
+          // renameIntoPlace 在流回调里执行,抛异常会绕过 main 的 catch(failSoftly 接不住),故返回布尔
+          if (!renameIntoPlace(tmp, dest)) return reject(new Error(`落盘失败(目标被占用或只读): ${dest}`));
+          resolve();
+        }));
         out.on('error', reject);
       },
       reject,
@@ -663,7 +680,7 @@ function httpsGet(url, options, onResponse, onError) {
   const proxyUrl = new URL(proxy);
   const connectReq = http.request({
     host: proxyUrl.hostname,
-    port: Number(proxyUrl.port) || 80,
+    port: Number(proxyUrl.port) || (proxyUrl.protocol === 'https:' ? 443 : 80),
     method: 'CONNECT',
     path: `${target.hostname}:443`,
   });
@@ -682,10 +699,22 @@ function httpsGet(url, options, onResponse, onError) {
 function renameIntoPlace(tmp, dest) {
   try {
     fs.renameSync(tmp, dest);
+    return true;
   } catch {
-    // Windows 上目标已存在时 rename 会失败,清掉再改名(并发下载同一文件的兜底)
-    fs.rmSync(dest, { force: true });
-    fs.renameSync(tmp, dest);
+    // Windows 上目标被占用时 rename 失败:清掉重试,再不行退回 copy 兜底
+    try {
+      fs.rmSync(dest, { force: true });
+      fs.renameSync(tmp, dest);
+      return true;
+    } catch {
+      try {
+        fs.copyFileSync(tmp, dest);
+        fs.rmSync(tmp, { force: true });
+        return true;
+      } catch {
+        return false;
+      }
+    }
   }
 }
 
@@ -705,7 +734,9 @@ function extractArchive(archive, destDir) {
   for (const [cmd, args] of strategies) {
     if (run(cmd, args, { timeoutMs: 300000 }).status === 0) return;
   }
-  throw new Error(`解压失败: ${archive}`);
+  // 残缺安装会让 findInHome 命中缺 lib 的目录且永不自愈——失败即清场
+  fs.rmSync(destDir, { recursive: true, force: true });
+  throw new Error(`解压失败(已清理残缺目录): ${archive}`);
 }
 
 // ---------------------------------------------------------------- 进程与环境

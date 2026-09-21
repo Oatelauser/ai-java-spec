@@ -84,6 +84,15 @@
 
 ## 7. 已知取舍与边界
 
+**门禁词法的已知取舍**(代码审查实测归档):
+- 测试夹具/注释里的示例口令字面量会被写入前门 deny(宁误报取向);需要密钥样本时放 `src/test/resources` 等非 .java 位置,或临时 `formatter`/门禁开关调整——未来可加 `allowlistPaths` 豁免。
+- 词法门禁有漏检面:`cp template.txt A.java`、`perl -pi -e`、`node -e fs.writeFileSync`、`sed --in-place`(长参)不拦——由 Stop 的 git 兜底复查与 Git 提交门收敛,风险限于回合内延迟发现。
+- `sk-` 前缀正则可能误拦 ≥20 字符的普通 slug(如 `sk-frontend-registry-cache-key`);`authToken`/`db_password` 等复合名漏检(由 PMD security 层兜底)。
+- Edit 模式下高危行号是 new_string 内的相对行号,与文件实际行号可能不符。
+- finding 台账按"文件+行号+规则"记键:文件顶部插/删行会使旧键失效,该轮表现为一次全量重灌+误记 FIXED,下一轮自愈;中期升级为"违规行内容指纹"。
+- touched-files 队列无 TTL:Stop 长期不运行时陈旧条目会累积并挤占 `stopMaxFiles` 名额。
+- MultiEdit 工具的 edits[] 数组不经写入前高危检测(PostToolUse/Stop 兜底)。
+
 - **格式化双层取舍**:本 hook 用 google-java-format(4 空格/100 列),pom 侧 Spotless
   (palantir,120 列)与它风格不同——并存时的重排代价与两种消振办法(关
   `formatter.enabled` / Spotless 改配 googleJavaFormat AOSP)见
