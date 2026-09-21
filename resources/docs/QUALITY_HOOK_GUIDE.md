@@ -105,7 +105,7 @@
 | 首次生效/审核 | 工作区信任弹窗(见 scripts/README FAQ 的恢复手册) | Claude Code 对项目 settings 中的 hooks 有自己的确认提示,机制不同 |
 | matcher 别名 | ApplyPatch→Write/Edit | 另有 MultiEdit 工具(matcher 已含) |
 
-**实测状态(如实)**:ZCode 侧已实证——引擎触发、写入前 deny、PostToolUse 回灌、Stop 的动作链(格式化改写、台账写入、队列清空);**但 Stop 的 additionalContext 提示在一次实测中未注入模型上下文**(文件确被格式化改写,模型却未收到"已自动格式化"提示;单次观测,复测待做)。在结论明确前,不要把"没看到 Stop 提示"当作"文件没被改写"的信号——回合结束后继续编辑前,先重新 Read 相关文件,否则 Edit 可能匹配失败。Claude Code 侧协议按其官方文档对齐(decision-reason 与 additionalContext 均为其支持形状),**未做真机验证**——首次在 Claude Code 项目接入后,先跑 `node scripts/selftest.js` + 一个违规探针写入确认回灌,再投入日常使用。
+**实测状态(如实)**:ZCode 侧已实证——引擎触发、写入前 deny、PostToolUse 回灌、Stop 的动作链(格式化改写、台账写入、队列清空);**但 Stop 的 additionalContext 提示在一次实测中未注入模型上下文**(文件确被格式化改写,模型却未收到"已自动格式化"提示;单次观测,复测待做)。在结论明确前,不要把"没看到 Stop 提示"当作"文件没被改写"的信号——回合结束后继续编辑前,先重新 Read 相关文件,否则 Edit 可能匹配失败。候选对策(复测确认缺口仍在再实现,避免与正常送达重复打扰):Stop 把"已自动格式化"通知写入 hook-state,由下一次 PostToolUse 在回灌开头转告,绕开 Stop 送达通道。Claude Code 侧协议按其官方文档对齐(decision-reason 与 additionalContext 均为其支持形状),**未做真机验证**——首次在 Claude Code 项目接入后,先跑 `node scripts/selftest.js` + 一个违规探针写入确认回灌,再投入日常使用。
 
 - **格式化双层取舍**:本 hook 用 google-java-format(4 空格/100 列),pom 侧 Spotless
   (palantir,120 列)与它风格不同——并存时的重排代价与两种消振办法(关
