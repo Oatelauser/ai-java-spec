@@ -7,15 +7,18 @@
 | 项 | 作用 |
 |---|---|
 | `.zcode/config.json` | ZCode 项目级 hook 挂载(编辑期增量质量检查,相对路径已预制好) |
-| `.claude/settings.json` | Claude Code 项目级 hook 挂载(同一 runner,双宿主并存互不干扰) |
+| `.claude/settings.json` + `commands/delegate-review.md` | Claude Code 项目级 hook 挂载 + `/delegate-review` 评审命令(与 ZCode 挂载同一 runner,多宿主并存互不干扰) |
+| `.codex/` | Codex 宿主 hook(`hooks.json`)+ 评审 skill(**资产已备,未真机验证**,首启须在 Codex 内 `/hooks` 逐条信任) |
+| `.opencodereview/` | 评审规约:`p3c-rules.md`(维护源)+ `rule.json`(生成物,勿手改) |
+| `CLAUDE.md` | Claude Code 入口(薄引用 `@AGENTS.md`,全部约定在 AGENTS.md) |
 | `AGENTS.md` | 新项目的全局工作约定 |
 | `docs/` | 知识文档(质量工具手册、hook 操作手册、发布流程、编码准则等) |
-| `scripts/` | hook-runner.js + 配置 + install.js |
-| `.tools/` | 工具缓存(由 install.js 预置生成,随拷贝带走后新项目免下载) |
+| `scripts/` | hook-runner.js + 配置 + install / selftest / build-rules / upgrade 脚本 |
+| `.tools/` | 工具缓存(现仅 google-java-format,约 4MB;由 install.js 预置生成,随拷贝带走后新项目免下载) |
 
 ## 使用流程
 
-**1. 一次性预置**(下载约 70MB 工具到 `resources/.tools/`,让 resources/ 完全自包含):
+**1. 一次性预置**(下载约 4MB 工具到 `resources/.tools/`,让 resources/ 完全自包含):
 
 ```bash
 node resources/scripts/install.js
@@ -23,20 +26,30 @@ node resources/scripts/install.js
 
 **2. 传导到新项目**,二选一:
 
-- 手动把 `resources/` 里的**全部文件和文件夹**(包括隐藏的 `.zcode/` 和 `.tools/`)拷贝/上传到新项目根目录;
+- 手动把 `resources/` 里的**全部文件和文件夹**(包括隐藏的 `.zcode/`、`.claude/`、`.codex/`、`.opencodereview/`、`.tools/`)拷贝/上传到新项目根目录;
 - 或一条命令推送:`node resources/scripts/install.js <目标项目根>`。
 
-**3. 用 ZCode 打开新项目目录**(重开会话才会加载 hook)即生效。
+**3. 用任一宿主打开新项目目录即生效**(重开会话才会加载 hook):
 
-> 关键语义:传导的是 resources/ 的**内容**,不是 resources/ 这个目录——新项目根直接出现 `.zcode/`、`AGENTS.md`、`docs/`、`scripts/`、`.tools/`,不应有 `resources/` 这一层。
+- **ZCode / Claude Code**:直接打开即可(hook 与评审命令随包生效);
+- **Codex**:首启须在 Codex 内 `/hooks` 逐条审阅信任(一次性,详见 `resources/.codex/README.md`)。
 
-install.js 安全阀:所在目录缺资产标记、目标是模板根、或从已部署项目根发起推送时,拒绝执行。
+> 关键语义:传导的是 resources/ 的**内容**,不是 resources/ 这个目录——新项目根直接出现 `.zcode/`、`.claude/`、`.codex/`、`.opencodereview/`、`AGENTS.md`、`CLAUDE.md`、`docs/`、`scripts/`、`.tools/`,不应有 `resources/` 这一层。
+
+install.js 安全阀:所在目录缺资产标记、目标是模板根、或从已部署项目根发起推送时,拒绝执行;目标已有自己的 `AGENTS.md` / `CLAUDE.md` 时跳过不覆盖(项目身份文件,如需模板约定请人工合并)。
 
 ## 整批升级工具版本(模板侧)
 
-1. 改 `resources/scripts/hook-config.json` 的版本字段(字段对照与版本查询地址见 [resources/docs/QUALITY_HOOK_GUIDE.md](resources/docs/QUALITY_HOOK_GUIDE.md) 第 1 节)。
-2. 模板目录重跑 `node resources/scripts/install.js`,自动下载新版本到 `resources/.tools/`(旧版本保留可回退,不需要可手动删)。
-3. 重新传导到各项目。已部署项目也可单独升级(改它自己的 `scripts/hook-config.json` 后跑 `node scripts/hook-runner.js warmup`),细节见手册。
+统一入口——升 ocr(npm 全局)→ 重生成 rule.json → selftest 回归 → `ocr delegate preview` 冒烟,任一步失败醒目输出回退命令:
+
+```bash
+node resources/scripts/upgrade.js           # 执行升级(会动全局 npm 包,失败给回退命令)
+node resources/scripts/upgrade.js --check   # 只查不升:ocr / google-java-format / SpotBugs 版本对比表
+```
+
+- 目标项目侧同理:`node scripts/upgrade.js`(升的是该项目环境)。
+- `.tools/` 内工具(google-java-format 等)版本改 `resources/scripts/hook-config.json` 对应字段后,重跑 `node resources/scripts/install.js` 下载新版(旧版保留可回退);ocr 的实测回归锚点登记在同文件 `ocr.baseline`,升级全绿后更新它。
+- GitHub CI 每周自动查新并开 issue 提醒(「依赖版本更新提醒」;workflow 在 `.github/workflows/version-watch.yml`,模板侧资产,不随拷贝传导)。
 
 ## 维护约定
 

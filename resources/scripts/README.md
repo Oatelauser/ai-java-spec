@@ -31,12 +31,13 @@ scripts/hook-runner.js     统一入口
 scripts/hook-config.json   全部开关/版本——改配置不改代码
 scripts/review-mark.js     评审完成状态标记(git 门校验用)
 scripts/build-rules.js     rule.json 生成器(改 .opencodereview/p3c-rules.md 后跑)
+scripts/upgrade.js         依赖版本查新与整批升级统一入口
 .tools/                    工具缓存(自动创建并写入 .gitignore)
 ```
 
 `hook-config.json` 常用字段:`formatter.*`(格式化开关/版本/风格)、`deepScan.enabled`(深度扫描,默认关)、`performance.stopMaxFiles`(Stop 层评审清单上限,默认 30,超额标注 partial/INCONCLUSIVE)、`failureMode`(`open`=检查异常时降级放行并留痕/`strict`=阻断,默认 open)、`feedback`(`important`=默认/`quiet`=只留违规压掉格式化与备注提示)。**工具 JVM 与项目 JDK 解耦**:工具只需 `JAVA_HOME`(JDK 11+)。格式化与 pom Spotless 并存的重排取舍见 `docs/CODE_QUALITY_TOOLS.md` 第 5 节。
 
-`ocr`(open-code-review)是全局 npm CLI,不在 `.tools/` 缓存内:缺失时编辑期评审降级(Stop 提示跳过、git 门按 `failureMode` 处理),安装 `npm install -g @alibaba-group/open-code-review`(要求 ≥v1.9.0,实测基线 v1.12.9)。
+`ocr`(open-code-review)是全局 npm CLI,不在 `.tools/` 缓存内:缺失时编辑期评审降级(Stop 提示跳过、git 门按 `failureMode` 处理),安装 `npm install -g @alibaba-group/open-code-review`(要求 ≥v1.9.0,实测基线 v1.12.9)。版本查新与升级的统一入口是 `node scripts/upgrade.js`(`--check` 只查不升)。
 
 ## 常见问题
 

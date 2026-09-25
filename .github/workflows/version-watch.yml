@@ -1,0 +1,44 @@
+# 模板侧资产:每周自动查依赖新版,发现即开/追评 issue 提醒。
+# 本文件在仓库根 .github/ 下,不随 resources/ 的拷贝传导——传导内容以 resources/ 为准。
+name: 版本监控
+
+on:
+  schedule:
+    - cron: '23 9 * * 1' # 每周一 09:23 UTC,刻意避开整点(整点 cron 拥挤,触发易延迟)
+  workflow_dispatch: {}
+
+# 最小权限:只读仓库内容;issues:write 供 gh CLI 开 issue/评论
+permissions:
+  contents: read
+  issues: write
+
+# 同一时刻只跑一个监控实例;已跑的不取消(排队等上一轮结束即可)
+concurrency:
+  group: version-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 依赖版本对比(只读)
+        id: check
+        continue-on-error: true # 发现新版 exit 1 是预期信号,由下一步转成 issue,不让 job 直接红
+        run: node resources/scripts/upgrade.js --check | tee "$RUNNER_TEMP/version-report.txt"
+      - name: 开 issue 提醒(仅当发现新版)
+        if: steps.check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          body="$(date -u +'## %Y-%m-%d %H:%M UTC')"$'\n\n'"$(cat "$RUNNER_TEMP/version-report.txt")"
+          num=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '依赖版本更新提醒 in:title' --json number --jq '.[0].number // empty')
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title '依赖版本更新提醒' --body "$body"
+          fi

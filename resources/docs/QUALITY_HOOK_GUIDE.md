@@ -55,6 +55,7 @@ delegate 模式下 `ocr` 端**零 LLM 调用、零 API key**——它只出清�
 
 ### 版本锚定与升级回归
 
+- **统一入口**:`node scripts/upgrade.js`——`--check` 只读对比三方版本(npm 最新 / 本机 / `hook-config.json` 的 `ocr.baseline` 锚点),默认模式自动封装下面的升级三步并给回退命令。
 - **依赖面声明**:本机制是薄集成——只依赖 `ocr delegate preview/rule` 的 **stdout 契约**与 `--format json`(需 **≥v1.9.0**);实测基线 **v1.12.9**。旧版报 `unknown flag: --format` 时,去掉该 flag 用文本输出继续,不要把文本硬当 JSON 解析。
 - **升级三步**(升级 ocr 后必跑,逐步执行;任一步异常即回退到原版本,并在仓库记 issue 留痕):
   1. 升级 CLI:`npm i -g @alibaba-group/open-code-review@latest`;

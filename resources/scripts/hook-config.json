@@ -6,6 +6,9 @@
     "style": "aosp",
     "autoFix": true
   },
+  "ocr": {
+    "baseline": "1.12.9"
+  },
   "deepScan": {
     "enabled": false,
     "buildTool": "auto",
