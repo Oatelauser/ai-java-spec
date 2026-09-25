@@ -1,0 +1,53 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/hook-runner.js\" pre-tool-use",
+            "commandWindows": "node \"$(git rev-parse --show-toplevel)/scripts/hook-runner.js\" pre-tool-use",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|shell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/hook-runner.js\" bash-gate",
+            "commandWindows": "node \"$(git rev-parse --show-toplevel)/scripts/hook-runner.js\" bash-gate",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/hook-runner.js\" post-tool-use",
+            "commandWindows": "node \"$(git rev-parse --show-toplevel)/scripts/hook-runner.js\" post-tool-use",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/hook-runner.js\" stop",
+            "commandWindows": "node \"$(git rev-parse --show-toplevel)/scripts/hook-runner.js\" stop",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}

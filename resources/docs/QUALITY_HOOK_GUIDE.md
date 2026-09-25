@@ -25,28 +25,41 @@ delegate 模式下 `ocr` 端**零 LLM 调用、零 API key**——它只出清�
 - **交付前全量评审**:同一套流程传范围参数(`ocr delegate preview --format json --from <上一版本 tag> --to HEAD`),只审两版本之间的 diff——与 pom 检查同界,不做全库扫描。
 - **`ocr` 缺失时**:命令只打印安装指引(`npm install -g @alibaba-group/open-code-review`),不自动安装、不阻断会话——降级为"git 自取清单 + 直读 rule.json 规则"继续评审;hook 侧的降级语义见本节末尾。
 
-### rule.json 自定义
+### rule.json 自定义(维护源与生成物)
 
-项目级评审规约在项目根 `.opencodereview/rule.json`(可提交入库):
+项目级评审规约是**人维护源、机器生成物**两份文件(均在项目根,可提交入库):
+
+- **维护源:`.opencodereview/p3c-rules.md`**——规则的唯一编辑入口。按 `## 组名` 分节,每条规则一行 `- [强制] 规则文本`(或 `- [建议]`),一行即一条。
+  - 加一条:在对应组下加一行;开新组就新增一个 `## 组名` 分节(组名去掉括号补注后就是生成文本里的行前缀)。
+  - 改一条:直接改该行文本或级别。
+  - 删一条:删掉该行;删整组连 `## 标题` 一起删(只留标题没有规则行,构建会报错防误删)。
+- **生成器:改完源跑 `node scripts/build-rules.js`**——幂等(产物无变化则不写文件只报 up-to-date);`scripts/install.js` 传导时也会自动跑一次,推出去的 rule.json 永远与源同步。
+- **生成物:`.opencodereview/rule.json`**——不要手改,下次生成会覆盖。评审导语(只评审改动行等)与 `exclude` 骨架在 `scripts/build-rules.js` 里维护。
+
+生成物的结构契约(读懂即可,不需要手编):
 
 ```json
 {
   "exclude": ["**/target/**"],
   "rules": [
-    { "path": "**/*.java", "rule": "……规约文本(markdown)……", "merge_system_rule": true }
+    { "path": "**/*.java", "rule": "……由 p3c-rules.md 组装的规约文本……", "merge_system_rule": true }
   ]
 }
 ```
 
-- `exclude`:不参与评审的 glob(生成物目录等);`include` 可把被内置默认排除的文件捞回来(如测试代码)。
-- `rules`:按声明顺序求值,**第一个 `path` 命中的条目独占生效**。要给 `.java` 增删规约,改同一条目里的 `rule` 文本;再加一条相同 path 的条目不会生效。
+- `exclude`:不参与评审的 glob(生成物目录等);`include` 可把被内置默认排除的文件捞回来(如测试代码)——这两项要调整时改生成器骨架后重新生成。
+- **评审边界(内置默认排除)**:测试代码(`**/src/test/java/**/*.java`、`**/*Test.java`、`**/*.test.*` 等)、生成物与不支持扩展名默认**不进评审**;确需评审测试代码,在 `include` 加对应 glob 覆盖。
+- `rules`:按声明顺序求值,**第一个 `path` 命中的条目独占生效**;再加一条相同 path 的条目不会生效。
 - `merge_system_rule: true`:保留 ocr 内置语言规则(含安全项),项目规约与之**合并**;false(默认)= 项目规约整段替换内置规则。
 - glob 匹配不区分大小写;`ocr rules check <文件路径>` 可查某文件实际命中哪条规则、来自哪一层。
 
-### 版本锚定与降级语义
+### 版本锚定与升级回归
 
-- 实测基线 **v1.12.9**;`--format json` 需 **≥v1.9.0**。旧版报 `unknown flag: --format` 时,去掉该 flag 用文本输出继续,不要把文本硬当 JSON 解析。
-- `ocr` 是年轻上游;本机制是薄集成——只依赖 preview/rule 的 stdout 契约,升级 ocr 大版本后先跑一次 `ocr delegate preview` 冒烟即可。
+- **依赖面声明**:本机制是薄集成——只依赖 `ocr delegate preview/rule` 的 **stdout 契约**与 `--format json`(需 **≥v1.9.0**);实测基线 **v1.12.9**。旧版报 `unknown flag: --format` 时,去掉该 flag 用文本输出继续,不要把文本硬当 JSON 解析。
+- **升级三步**(升级 ocr 后必跑,逐步执行;任一步异常即回退到原版本,并在仓库记 issue 留痕):
+  1. 升级 CLI:`npm i -g @alibaba-group/open-code-review@latest`;
+  2. 仓库根跑 `node scripts/selftest.js`,须全绿;
+  3. `ocr delegate preview --format json --from <上一版本 tag> --to HEAD` 冒烟,比对输出结构与既往一致(JSON 可解析、顶层字段仍在)。
 - **未装 ocr 的降级**:编辑期 hook 照记改动队列,Stop 提示"未检测到 ocr,编辑期评审跳过";git 门 `open` 模式留痕放行 / `strict` 模式阻断;交付前 pom 三类检查兜底不变。
 
 ## 2. 深度安全扫描(默认关)
@@ -102,9 +115,9 @@ delegate 模式下 `ocr` 端**零 LLM 调用、零 API key**——它只出清�
 - **无 `.git` 的项目退化**:git 门恒空、`ocr delegate preview` 无法运行——编辑期评审退化为提醒 + 纪律,构建插件/代码生成器等其它途径的重写也不进评审视野,由 `mvn verify`/CI 收敛,建议项目 git 化。
 - `ocr` 上游年轻:本机制只依赖 preview/rule 的 stdout 契约,上游破坏性变更的影响面=清单与规则的取法(有降级路径),评审本身不受影响。
 
-## 6. 多宿主接入(ZCode 与 Claude Code)
+## 6. 多宿主接入(ZCode、Claude Code 与 Codex)
 
-资产自带两份宿主配置,**并存互不干扰**(各宿主只认自己的文件):`.zcode/config.json`(ZCode)与 `.claude/settings.json`(Claude Code),指向同一个 `scripts/hook-runner.js`——runner 自动识别两家的项目目录变量。
+资产自带三份宿主配置,**并存互不干扰**(各宿主只认自己的文件):`.zcode/config.json`(ZCode)与 `.claude/settings.json`(Claude Code)指向同一个 `scripts/hook-runner.js`——runner 自动识别两家的项目目录变量;`.codex/hooks.json`(Codex,见文末小节)也指向同一 runner。
 
 | 差异点 | ZCode | Claude Code |
 |---|---|---|
@@ -124,3 +137,19 @@ delegate 模式下 `ocr` 端**零 LLM 调用、零 API key**——它只出清�
   `docs/CODE_QUALITY_TOOLS.md` 第 5 节。将来可选:formatter 委托项目 Spotless 的 mode
   (风格单一来源,代价是每次编辑走一次 Maven),真实项目感到痛时再实现。
 - 其余边界(hook 不替代 verify/CI、工具 JVM 与项目 JDK 解耦)见 `scripts/README.md`。
+
+### Codex(OpenAI Codex CLI)——资产已备,未真机验证
+
+资产(随包自动下发):`.codex/hooks.json`——PreToolUse(`apply_patch` 写入前密钥检查 + `Bash` 命令门)/ PostToolUse / Stop 三事件,全部指向同一个 `scripts/hook-runner.js`(Codex 不设项目目录变量,runner 回退到脚本自身定位,宿主无关);`.codex/skills/delegate-review/SKILL.md`——评审入口;`.codex/README.md`——首启信任说明。配置形态依据官方 hooks 文档(developers.openai.com/codex/hooks,2026-09 查证):字段 `type/command/matcher/timeout`(秒)/`commandWindows`,matcher 为正则,规范工具名 `Bash` 与 `apply_patch`(`Edit`/`Write` 是 matcher 别名)。
+
+**首启(拷贝即生效的已知例外,一次性)**:Codex 对非用户级 hooks 有信任流——首次启动弹 "Hooks need review" 面板,须在 Codex 内 `/hooks` 逐条审阅信任(基于 hash,一次性;`hooks.json` 内容变更需重审);且项目级 `.codex/` 层仅在 trusted 项目加载。这步不做,hooks 完全不生效。
+
+**缺口与差异(如实)**:
+
+- 官方自述 hooks 是 "guardrail, not enforcement boundary":experimental 的 `unified_exec` 与 `WebSearch` 不被 PreToolUse 完整拦截——门禁承诺按护栏级,同其余宿主一样不得替代交付前全量检查。
+- runner 的 deny 在 Codex 落到 `{decision:"deny"}` + exit 2 分支:exit 2 是 Codex 文档化的阻断信号(阻断大概率生效),但理由送达路径未验证(Codex 的 exit-2 语义读 stderr,runner 的 reason 在 stdout JSON 里);若该形状被拒收即 fail-open。待真机确认,必要时 runner 增 Codex 分支。
+- Codex 的 `apply_patch` 事件里补丁文本走 `tool_input.command`(无 `file_path`/`content`),runner 的写入前密钥扫描与 PostToolUse 队列标记可能空转;Stop 层靠 git 改动扫描兜底,git 项目不受影响,非 git 项目两层皆空转(同第 5 节非 git 边界)。
+- 命令路径按官方建议用 `$(git rev-parse --show-toplevel)` 解析(Codex 可能从子目录启动,相对路径会失效);超时字段名以官方文档的 `timeout` 为准。
+- 无用户自定义 slash command:评审入口是 skill(模型自动选用,或 `@Delegate Review` 点名),正文薄引用项目根 `.claude/commands/delegate-review.md`,单一事实源。
+
+**状态:未真机验证,列入交接清单**(信任流、deny 形状与理由送达、`apply_patch` 输入形状、Stop 提醒注入、Windows `commandWindows` 的实际执行 shell,均待真机确认)。

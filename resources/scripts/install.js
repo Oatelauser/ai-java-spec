@@ -49,6 +49,8 @@ try {
 function main() {
   assertAssetsComplete();
   const target = process.argv[2] ? path.resolve(process.argv[2]) : null;
+  // 拷贝/补齐前先把 rule.json 与维护源 p3c-rules.md 重新生成对齐,消灭"源改了产物没跟"的漂移
+  syncRules();
 
   // 工具预置复用 runner 的 warmup:同一份下载/解压逻辑,不维护两套
   console.log('[install] 预置工具(已就绪则秒过)...');
@@ -83,13 +85,28 @@ function main() {
   console.log('[install] 下一步: 用 ZCode 打开该目录(重开会话加载 hook),写一个违规 .java 验证。');
 }
 
+// 规则产物与维护源对齐:子进程跑一次 build-rules(幂等,无变化不写文件)。
+// 失败只留痕不阻断——生成器/源缺失不拦安装,现存 rule.json 原样继续用
+function syncRules() {
+  const gen = spawnSync(process.execPath, [path.join(__dirname, 'build-rules.js')], { stdio: 'inherit' });
+  if (gen.status !== 0) {
+    console.warn(`[install] 警告: 重新生成 rule.json 失败(${gen.error ? gen.error.message : `exit ${gen.status}`}),继续用现存 rule.json;请修复后重跑`);
+  }
+}
+
 // ocr(open-code-review)是评审链路的可选外部 CLI:检测到缺失只打印安装指引,
 // 不代装、不影响退出码——未装时 hook 自身有降级语义(编辑期评审跳过、git 门按 failureMode 处理)
 function checkOcr() {
   // shell:true 仅为 Windows 解析 npm 全局装的 ocr.cmd(spawn 默认不查 PATHEXT);参数是静态的,无注入面
   const probe = spawnSync('ocr', ['--version'], { shell: true, encoding: 'utf8' });
   if (probe.status === 0 && probe.stdout && probe.stdout.trim()) {
-    console.log(`[install] 检测到 ocr: ${probe.stdout.trim().split(/\r?\n/)[0]}`);
+    const firstLine = probe.stdout.trim().split(/\r?\n/)[0];
+    console.log(`[install] 检测到 ocr: ${firstLine}`);
+    const v = (firstLine.match(/(\d+)\.(\d+)\.(\d+)/) || []).slice(1).map(Number);
+    // v1.9.0 是 --format json 的下限,低于它 stdout 契约不完整;只警告不拦截,不做强锁
+    if (v.length === 3 && (v[0] < 1 || (v[0] === 1 && v[1] < 9))) {
+      console.warn(`[install] 警告: ocr ${v.join('.')} 低于 v1.9.0(--format json 不可用,评审契约不完整),建议升级: npm install -g @alibaba-group/open-code-review@latest`);
+    }
     return;
   }
   console.warn('');

@@ -26,10 +26,11 @@
 .zcode/config.json         hook 挂载(ZCode 宿主)
 .claude/settings.json      hook 挂载(Claude Code 宿主)
 .claude/commands/          评审命令资产(delegate-review.md)
-.opencodereview/rule.json  评审规约(p3c 蒸馏,可自定义)
+.opencodereview/rule.json  评审规约(产物,勿手改;源=p3c-rules.md)
 scripts/hook-runner.js     统一入口
 scripts/hook-config.json   全部开关/版本——改配置不改代码
 scripts/review-mark.js     评审完成状态标记(git 门校验用)
+scripts/build-rules.js     rule.json 生成器(改 .opencodereview/p3c-rules.md 后跑)
 .tools/                    工具缓存(自动创建并写入 .gitignore)
 ```
 
