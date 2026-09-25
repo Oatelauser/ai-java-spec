@@ -2,7 +2,7 @@
 
 > 资料文件。新建/接手 Maven 项目时按本文配置;修改 Java 代码后按"AI 执行约定"运行检查。
 > 三类检查统一绑在 `verify` 阶段,一条 `mvn -DskipTests verify` 全部触发。
-> 本文是**交付门禁**(全量);编辑期的秒级增量反馈由项目级 hook 承担(见第 5 节),两者互补。
+> 本文是**交付门禁**(全量),也是全项目**唯一确定性全量检查**——编辑期与交付前的 AI 评审(OCR delegate,LLM 非确定)以本文三类构建级检查为最终兜底,两者互补(编辑期机制见第 5 节)。
 > 版本号为 2026-09 的参考值,初始化时用 `mvn versions:display-plugin-updates` 校准;
 > **唯一不许升级的是 maven-pmd-plugin(必须钉在 3.21.x,原因见下)**。
 
@@ -171,15 +171,17 @@ dependency-check。两个互补,都要。
    AGENTS.md 的 Rationale-Oriented 注释要求)。
 4. 改的是单模块就只跑该模块(见第 0 节),不要无差别全量构建拖慢迭代。
 
-## 5. 编辑期增量检查:项目级 hook(与 verify 门禁互补)
+## 5. 编辑期检查:项目级 hook(与 verify 门禁互补)
 
-本项目自带一套**项目级 ZCode hook**,在 AI 编辑 `.java` 的当下做秒级增量检查,不必等
-全量 verify。机制、配置、升级与排障见 [scripts/README.md](../scripts/README.md) 与
+本项目自带一套**项目级 hook**(ZCode 与 Claude Code 双宿主),在 AI 写 `.java` 的当下与
+回合末做增量约束:写入前密钥拦截、回合末格式化自动修复、回合级 OCR delegate 评审
+(宿主模型按 `.opencodereview/rule.json` 的 p3c 蒸馏规约评审当轮改动)。机制、配置与
+排障见 [scripts/README.md](../scripts/README.md) 与
 [QUALITY_HOOK_GUIDE.md](QUALITY_HOOK_GUIDE.md)。
 
-与 pom 门禁的关系:**hook 是编辑期反馈,verify/CI 是最终门禁**,两者规则集可以不同——
-hook 默认用 PMD 7 quickstart(现代、新语法友好),pom 门禁用 p3c(严格对齐阿里手册);
-想统一为阿里规约,按 QUALITY_HOOK_GUIDE 第 3 节切换(p3c 2.1.1 只兼容 PMD 6,约束见第 1 节)。
+与 pom 门禁的关系:**hook 评审是编辑期反馈(LLM 非确定、只覆盖当轮改动),本文的
+verify/CI 是确定性全量门禁**,两者互补;交付前另需 AI 全量评审(上一版本..本版本
+diff,见 AGENTS.md 交付门禁段)。
 
 **格式化的双层取舍**:hook 用 google-java-format(4 空格/100 列,风格固定),本手册
 第 2 节的 Spotless 用 palantir(4 空格/120 列)。两层风格不同,同时启用时以 pom 的

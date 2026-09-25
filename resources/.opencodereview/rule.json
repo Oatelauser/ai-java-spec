@@ -1,0 +1,16 @@
+{
+  "exclude": [
+    "**/target/**",
+    "**/build/**",
+    "**/node_modules/**",
+    "**/.tools/**",
+    "**/.git/**"
+  ],
+  "rules": [
+    {
+      "path": "**/*.java",
+      "rule": "对本文件的改动按以下项目规约评审(蒸馏自《阿里巴巴 Java 开发手册》高频条款)。只评审改动行(+ 行),可参考同文件近上下文作判据;信息不足判不了的,跳过该条并在报告中注明,不要猜。每条标注了类别与严重度倾向。\n\n## 1. 命名 [style,倾向 low;语义误导时 medium]\n- 类名 UpperCamelCase;方法名/变量名 lowerCamelCase;常量全大写下划线分隔(如 MAX_STOCK_COUNT)。\n- POJO 类布尔属性不加 is 前缀(定义 success 而非 isSuccess),避免部分序列化/反序列化框架取值错误。\n- 抽象类以 Abstract 或 Base 开头;异常类以 Exception 结尾;测试类以「被测类名 + Test」结尾。\n- 杜绝望文不知义的缩写(自造缩写把名字变成谜语)。\n\n## 2. 常量与魔法值 [maintainability,倾向 medium]\n- 不允许魔法值直接出现在代码中:同一意义的字面量在代码中出现两次及以上,或虽只出现一次但命名/注释无法让新成员不看调用方就懂用途(如 `if (state == 3)`),必须提取为命名常量。\n- long 字面量用大写 L 后缀(如 `long id = 2L;`),禁用小写 l(与数字 1 难以分辨)。\n\n## 3. 包装类型与基本类型 [bug,倾向 medium]\n- POJO 类属性必须使用包装数据类型;RPC 方法的返回值与参数必须使用包装数据类型(避免 null 拆箱 NPE 与默认值歧义);局部变量推荐使用基本类型。\n\n## 4. 集合遍历中修改 [bug,倾向 high]\n- 禁止在 foreach 循环里对正在遍历的集合做 remove/add 操作;删除元素改用 Iterator 方式(Iterator#remove),并发操作需对 Iterator 对象加锁。命中即报——这是 ConcurrentModificationException 的直接来源。\n\n## 5. 集合转换与视图陷阱 [bug,倾向 medium]\n- `Arrays.asList(...)` 返回定长视图:对它 add/remove/clear 会抛 UnsupportedOperationException。\n- `subList` 结果是原列表的视图:使用子列表期间修改原列表,会抛 ConcurrentModificationException 或产生不确定行为。\n- 集合转数组用 `toArray(new T[0])` 或 `toArray(new T[size()])`,不用无参 `toArray()` 后强转。\n- 禁止用原始类型(raw type,如 `List list`)接收泛型集合。\n\n## 6. 集合初始化容量 [performance,倾向 low;仅循环体内或每请求必经路径值得报]\n- 可预估元素个数时,HashMap/ArrayList 等初始化即指定容量(HashMap 按预期元素数 / 0.75 + 1 取整),避免扩容 rehash。单次小集合可不报。\n\n## 7. SimpleDateFormat 线程安全 [bug,倾向 high]\n- SimpleDateFormat 非线程安全:共享/可复用场景禁止定义为 static 字段、禁止在多线程路径复用同一实例;确认单线程上下文且注释说明豁免理由的可不报。改用 java.time.DateTimeFormatter(静态常量)或 ThreadLocal 包装。其它非线程安全可变工具(如 Matcher)同理。\n\n## 8. 线程池创建 [bug,倾向 medium;无界队列/无界线程可升 high]\n- 线程资源必须通过线程池提供:禁止 `new Thread(...)` 裸启线程(单次脚本或测试代码除外,需注明理由)。\n- 禁止 `Executors.newFixedThreadPool` / `newSingleThreadExecutor` / `newCachedThreadPool` / `newScheduledThreadPool` 等快捷工厂(队列无界或线程数不受控)。\n- 用 `new ThreadPoolExecutor(...)` 显式指定核心/最大线程数、队列容量、拒绝策略、线程工厂(线程命名,便于排障)。\n\n## 9. ThreadLocal 清理 [bug,倾向 high]\n- ThreadLocal 用毕必须 remove():线程池场景线程复用,不清理会导致数据串用与内存泄漏;用 try/finally 或拦截器统一清理。\n\n## 10. 异常吞噬 [bug,倾向 high]\n- 空 catch 块、catch 后仅注释、仅 `e.printStackTrace()` 均不允许:异常必须用日志记录(带堆栈,如 `logger.error(\"msg\", e)`)或转为有意义的异常向上传播。\n- 捕获 Exception/Throwable 顶层异常必须有区分度的处理,不许为通过编译而宽捕获。\n- 禁止用返回错误码替代异常传播。\n\n## 11. finally 中的 return [bug,倾向 high]\n- 禁止在 finally 块中使用 return(或 throw):会丢弃 try/catch 块的返回值或吞掉异常,使方法结果失真。\n\n## 12. 资源关闭 [bug,倾向 high]\n- 文件流/网络连接/数据库连接等资源必须关闭:优先 try-with-resources;否则在 finally 中 close,且 close 自身异常要处理。\n\n## 13. 空指针防卫 [bug,倾向 high]\n- 远程调用/RPC 返回值、Map.get 结果、数据库查询结果、集合元素取值,使用前必须判空或用 Optional。\n- equals 比较用常量或确定非空的一方在前(如 `\"CONST\".equals(var)`)。\n- 只报告确有 NPE 触达路径的点位,不做全文件吹毛求疵。\n\n## 14. SQL 拼接 [security,倾向 high;注入路径成立时 critical]\n- 禁止字符串拼接构造 SQL(尤其把外部输入拼进 WHERE/ORDER BY/LIKE);必须参数化:JDBC 用 PreparedStatement 占位符,MyBatis 用 `#{}` 而非 `${}`(`${}` 仅限列名排序等白名单场景且必须校验输入)。\n\n## 15. 循环内字符串拼接 [performance,倾向 medium]\n- 循环体内字符串拼接用 StringBuilder.append,不用 `+` 反复拼接(每次生成新对象);循环已知上限 ≤10 且注释说明的可不报。\n\n## 16. 金额计算 [bug,倾向 high]\n- 金额/货币计算必须 BigDecimal(禁 double/float,精度丢失),展示层才转字符串。\n\n## 17. 生产代码打印 [maintainability,倾向 medium]\n- 生产代码禁 System.out/println(含 e.printStackTrace),统一走日志框架;异常日志须带上下文与堆栈。",
+      "merge_system_rule": true
+    }
+  ]
+}

@@ -10,8 +10,8 @@
 
 ## 质量门禁(Java)
 - 规范基准:阿里 Java 开发手册(以 alibaba/p3c 仓库最新版为准,当前黄山版)。写码时就主动往规范靠(命名、异常、并发、集合、注释),不要依赖门禁兜底。
-- 编辑期增量检查(自动 hook):AI 每次写/改 `.java` 自动触发格式化(自动修复)、规范、安全三类秒级检查,违规回灌——**当场修复,不绕过、不积压**(机制与配置见 [scripts/README.md](scripts/README.md))。
-- 交付门禁(不因 hook 而豁免):hook 只是编辑期反馈,交付/发布前的全量检查仍必须执行。项目未在 pom 配置三类检查(规约 p3c-pmd、格式化 Spotless、安全 SpotBugs+FindSecBugs、OWASP dependency-check)时,按 [质量工具手册](docs/CODE_QUALITY_TOOLS.md) 配进根 pom,全局配置、按模块执行;配置时机为"首个交付前到位"即可,不必先于写码——新项目开局直接写功能(hook 在编辑期兜底),pom 门禁在交付前补齐。
+- 编辑期检查(自动 hook):写/改 `.java` 当场受写入前密钥拦截;回合末自动格式化修复,并做**回合级 OCR delegate 评审**(宿主模型按 `.opencodereview/rule.json` 规约评审当轮改动)——**发现当场修复,不绕过、不积压**(机制与配置见 [scripts/README.md](scripts/README.md))。
+- 交付门禁(不因 hook 而豁免):hook 只是编辑期反馈,交付/发布前的全量检查仍必须执行,且增加**交付前 AI 全量评审**(上一版本..本版本 diff,`/delegate-review` 传范围参数,critical/high 清零;medium 修复或注明豁免理由;low/疑似误报可丢弃但留一句记录)。项目未在 pom 配置三类检查(规约 p3c-pmd、格式化 Spotless、安全 SpotBugs+FindSecBugs、OWASP dependency-check)时,按 [质量工具手册](docs/CODE_QUALITY_TOOLS.md) 配进根 pom,全局配置、按模块执行;配置时机为"首个交付前到位"即可,不必先于写码——新项目开局直接写功能(hook 在编辑期兜底),pom 门禁在交付前补齐。
 - 修改 Java 代码后:先跑与改动直接相关的测试,再按手册运行检查并修复全部违规;禁止用调阈值、加豁免让构建变绿。
 
 ## 交付与发版
@@ -20,6 +20,6 @@
 - 版本规划、发布日动作、打 tag 遵循 [发布流程](docs/RELEASE_PROCESS.md)。
 
 ## 知识文档(按需)
-- hook 深入操作(升级版本/下载排障/离线安装/p3c 切换):[hook 操作手册](docs/QUALITY_HOOK_GUIDE.md)。
+- hook 深入操作(OCR delegate 评审、规则自定义、降级语义、深度扫描):[hook 操作手册](docs/QUALITY_HOOK_GUIDE.md)。
 - 作为公共项目 [发布 Maven Central 流程](docs/MAVEN_CENTRAL_PUBLISHING.md)。
 - 项目明确要求二进制原生部署，遵守 [Native Image 手册](docs/GRAALVM_NATIVE_IMAGE_SUPPORT.md)。

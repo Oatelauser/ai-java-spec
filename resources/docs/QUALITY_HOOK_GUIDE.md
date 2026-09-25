@@ -3,97 +3,106 @@
 > 本手册全部以**当前项目**为视角:所有路径都在项目根下,现查现用。
 > 本机制来自质量模板,模板仓库侧的操作与本项目无关。
 
-## 1. 升级工具版本(以 google-java-format 为例)
+## 1. OCR delegate 评审(编辑期规范与安全检查)
 
-**版本号只有一个登记处:本项目的 `scripts/hook-config.json`。**
+### 架构
 
-1. **查可用版本**:打开 https://repo1.maven.org/maven2/com/google/googlejavaformat/google-java-format/ ,列出的目录名就是全部可选版本。
-2. **改版本号**——只动 `formatter.version` 这一个字段:
+编辑期规范/安全检查由"本地静态分析工具"改为**宿主模型评审 + `ocr` CLI 确定性分工**(delegate 模式):
 
-   ```json
-   {
-     "formatter": {
-       "enabled": true,
-       "tool": "google-java-format",
-       "version": "1.19.2",
-       "style": "aosp",
-       "autoFix": true
-     }
-   }
-   ```
-
-3. **下载新版**:项目根跑 `node scripts/hook-runner.js warmup`(不跑也行,下次检查发现缺版本会自动下载)。新版本落在 `.tools/<工具>/<新版本>/`,旧版本原样保留,想回退把版本号改回去即可。
-
-各工具对应的字段与版本查询地址:
-
-| 工具 | 字段(scripts/hook-config.json) | 在哪查可用版本 |
+| 环节 | 谁执行 | 说明 |
 |---|---|---|
-| google-java-format | `formatter.version` | https://repo1.maven.org/maven2/com/google/googlejavaformat/google-java-format/ |
-| PMD | `convention.version` | https://github.com/pmd/pmd/releases |
-| SpotBugs(默认关) | `deepScan.spotbugsVersion` | https://github.com/spotbugs/spotbugs/releases |
-| FindSecBugs(默认关) | `deepScan.findsecbugsVersion` | https://repo1.maven.org/maven2/com/h3xstream/findsecbugs/findsecbugs-plugin/ |
-| p3c 预设的 PMD | `convention.version` 固定 `6.55.0` | 不可升:p3c-pmd 2.1.1 只兼容 PMD 6 |
+| 文件筛选(该审哪些) | `ocr delegate preview` | 基于 git diff 的多门过滤(二进制/敏感路径/用户 exclude/扩展名/内置默认排除),stdout 输出 JSON |
+| 规则解析(用什么标准) | `ocr delegate rule` | 内置语言规则(java 安全/质量规则)+ 项目根 `.opencodereview/rule.json`(p3c 蒸馏规约),按文件分组输出 |
+| 评审本身 | 宿主 AI 模型 | 拿 diff + 规则 checklist 逐文件评审,产出分级发现并修复 |
+| 状态落地 | `node scripts/review-mark.js done` | 评审完成时写状态标记(含 diff 指纹),git 提交门据此校验 |
 
-## 2. 下载与离线安装
+delegate 模式下 `ocr` 端**零 LLM 调用、零 API key**——它只出清单与规则,评审智能全部来自宿主模型。对环境的硬要求只有两个:`ocr` 在 PATH 上 + 当前目录是 git 仓库。
 
-- **下载时机**:`.tools/` 若随资产携带则完全免下载;否则首次检查自动下载(约 60-70MB、20 秒量级,受网络影响),之后离线复用;也可随时 `node scripts/hook-runner.js warmup` 主动预置。
-- **下载透明**:`warmup`/检查下载时实时打印每个候选地址(`[download] <URL>`);失败信息列出**全部候选 URL + 精确存放路径**,照抄浏览器下载放好再重跑即跳过。
-- **代理**:支持 `HTTPS_PROXY` 环境变量。
-- **手动存放路径表**(项目根相对,版本号以 hook-config.json 为准):
+### 命令用法
 
-  | 工具 | 手动存放路径(免改名,官方原文件名即可) | 官方来源 |
-  |---|---|---|
-  | google-java-format | `.tools/google-java-format/` 下任一:`gjf-<版本>.jar` 或原名 `google-java-format-<版本>-all-deps.jar` | Maven Central(候选地址见报错) |
-  | PMD | `.tools/pmd/` 下任一:`pmd-<版本>.zip`、`pmd-dist-<版本>-bin.zip`(7.x 原名)、`pmd-bin-<版本>.zip`(6.x 原名);解压由 runner 自动完成 | GitHub Releases |
-  | SpotBugs(默认关) | `.tools/spotbugs/spotbugs-<版本>.tgz` | GitHub Releases |
-  | FindSecBugs 插件(默认关) | `.tools/spotbugs/spotbugs-<版本>/plugin/findsecbugs-plugin-<版本>.jar` | Maven Central |
-  | p3c 预设附加 jar | `.tools/pmd/pmd-<版本>/lib/` 下放 `p3c-pmd-<版本>.jar`、`kotlin-stdlib-<版本>.jar`、`kotlin-stdlib-jdk8-<版本>.jar` | Maven Central |
+- **Claude Code 宿主**:斜杠命令 `/delegate-review`(资产在 `.claude/commands/delegate-review.md`)。流程:preview(取清单)→ rule(取规则)→ 逐文件评审(覆盖率强制,每个文件必须落到 reviewed 或带理由的 skipped)→ 修复 → 收尾执行 `node scripts/review-mark.js done`。清单超过 12 个文件自动指引分批评审。
+- **其它宿主/手动**:`ocr delegate` 只有 preview 与 rule 两个子命令,照 `.claude/commands/delegate-review.md` 的步骤手动执行即可,无任何宿主绑定。
+- **交付前全量评审**:同一套流程传范围参数(`ocr delegate preview --format json --from <上一版本 tag> --to HEAD`),只审两版本之间的 diff——与 pom 检查同界,不做全库扫描。
+- **`ocr` 缺失时**:命令只打印安装指引(`npm install -g @alibaba-group/open-code-review`),不自动安装、不阻断会话——降级为"git 自取清单 + 直读 rule.json 规则"继续评审;hook 侧的降级语义见本节末尾。
 
-- **PMD 只有 GitHub Releases 一个渠道**:受限网络可能超时(自动重试);彻底失败时可用公共 GitHub 镜像站下载 zip,再按上表路径放入,效果等同手动安装。
+### rule.json 自定义
 
-## 3. 切换阿里 p3c 规约
+项目级评审规约在项目根 `.opencodereview/rule.json`(可提交入库):
 
-把 `scripts/hook-config.pmd6-p3c.json` 的内容覆盖到 `scripts/hook-config.json` 即可(PMD 固定 6.55.0)。**`p3cKotlinVersion` 字段别删**:p3c 含 Kotlin 实现的规则,standalone PMD 必须显式带 kotlin-stdlib,删了会报 `ClassNotFoundException: kotlin...`。
+```json
+{
+  "exclude": ["**/target/**"],
+  "rules": [
+    { "path": "**/*.java", "rule": "……规约文本(markdown)……", "merge_system_rule": true }
+  ]
+}
+```
 
-## 4. 深度安全扫描(默认关)
+- `exclude`:不参与评审的 glob(生成物目录等);`include` 可把被内置默认排除的文件捞回来(如测试代码)。
+- `rules`:按声明顺序求值,**第一个 `path` 命中的条目独占生效**。要给 `.java` 增删规约,改同一条目里的 `rule` 文本;再加一条相同 path 的条目不会生效。
+- `merge_system_rule: true`:保留 ocr 内置语言规则(含安全项),项目规约与之**合并**;false(默认)= 项目规约整段替换内置规则。
+- glob 匹配不区分大小写;`ocr rules check <文件路径>` 可查某文件实际命中哪条规则、来自哪一层。
+
+### 版本锚定与降级语义
+
+- 实测基线 **v1.12.9**;`--format json` 需 **≥v1.9.0**。旧版报 `unknown flag: --format` 时,去掉该 flag 用文本输出继续,不要把文本硬当 JSON 解析。
+- `ocr` 是年轻上游;本机制是薄集成——只依赖 preview/rule 的 stdout 契约,升级 ocr 大版本后先跑一次 `ocr delegate preview` 冒烟即可。
+- **未装 ocr 的降级**:编辑期 hook 照记改动队列,Stop 提示"未检测到 ocr,编辑期评审跳过";git 门 `open` 模式留痕放行 / `strict` 模式阻断;交付前 pom 三类检查兜底不变。
+
+## 2. 深度安全扫描(默认关)
 
 `hook-config.json` 里 `deepScan.enabled: true` 开启后,`Stop` 层会先 `mvn compile` 再跑 SpotBugs + FindSecBugs 扫 `target/classes` 字节码(需要 `pom.xml` 与 mvn/mvnw)。只在需要深度扫描时打开,会增加回合末耗时。
 
-## 5. 写入前门、命令门与 finding 台账
+### 工具版本与手动离线(格式化与深度扫描工具)
 
-三层防线(分级响应:只有确定性高危才阻断,规范类仍走事后回灌):
+版本号唯一登记处是 `scripts/hook-config.json`;`node scripts/hook-runner.js warmup` 主动预置下载,失败信息会列出全部候选 URL 与精确存放路径(支持 `HTTPS_PROXY`),照抄浏览器下载放好再重跑即跳过。
 
-- **写入前高危门**(PreToolUse, Edit|Write):毫秒级正则检测硬编码密钥/口令/云厂商 Key(私钥内容、`password/secret/token= "..."` 赋值、AKIA/sk-/ghp_/xox* 前缀)。命中即 deny,坏代码不落盘,回灌"改用环境变量/配置中心"的修复建议。刻意不用 PMD——写入前门的性能契约是秒级的百分之一。
+| 工具 | 字段(hook-config.json) | 在哪查可用版本 | 手动存放路径(免改名) |
+|---|---|---|---|
+| google-java-format | `formatter.version` | Maven Central | `.tools/google-java-format/` 下 `gjf-<版本>.jar` 或官方原名 jar |
+| SpotBugs(默认关) | `deepScan.spotbugsVersion` | GitHub Releases | `.tools/spotbugs/spotbugs-<版本>.tgz` |
+| FindSecBugs 插件(默认关) | `deepScan.findsecbugsVersion` | Maven Central | `.tools/spotbugs/spotbugs-<版本>/plugin/findsecbugs-plugin-<版本>.jar` |
+
+## 3. 写入前门、命令门与评审状态标记
+
+三层防线(分级响应:只有确定性高危才阻断,评审类靠状态标记与流程收口):
+
+- **写入前高危门**(PreToolUse, Edit|Write):毫秒级正则检测硬编码密钥/口令/云厂商 Key(私钥内容、`password/secret/token= "..."` 赋值、AKIA/sk-/ghp_/xox* 前缀)。命中即 deny,坏代码不落盘,回灌"改用环境变量/配置中心"的修复建议。
 - **命令门**(PreToolUse, Bash)两件事:
-  - 防旁路:检测 heredoc/重定向/`sed -i`/`tee` 及 PowerShell 的 `Out-File`/`Set-Content`/`Add-Content`/`.NET WriteAll*` 直接写改 `.java`,deny 并引导改用 Write/Edit 进入扫描链路;
-  - Git 门:`git commit/push` 前对改动的 `.java` 跑 PMD,有未修复违规即阻断;改动文件超过 `performance.gitGateMaxFiles`(默认 20)时,`open` 模式跳过检查留痕放行、`strict` 模式拒绝。
-- **finding 台账**(Stop 复查去重):同一条违规(文件+行+规则)只完整回灌一次,之后只计数提示("另有 N 条此前已报告");本轮检查过但未再出现的判定为已修复,追加到不可覆盖的 `.tools/hook-state/findings-history.log`。台账按"行号"记键,格式化导致行号漂移可能重新完整报告一次,属已知取舍。
-- **编辑期容忍"未使用类"中间态**:PostToolUse 对 `UnnecessaryImport/UnusedPrivateField/UnusedLocalVariable/UnusedPrivateMethod/UnusedFormalParameter` 静默(单次编辑看不到整个回合的意图——"先加声明、下次编辑才使用"是合法节奏);Stop 全量复查兜底,回合结束时真正没人用的会被抓到。
+  - 防旁路:检测 heredoc/重定向/`sed -i`/`tee` 及 PowerShell 的 `Out-File`/`Set-Content`/`Add-Content`/`.NET WriteAll*` 直接写改 `.java`,deny 并引导改用 Write/Edit 进入受控链路;
+  - Git 门:`git commit/push` 前做**评审状态标记校验**(不再重跑静态分析)。标记由 `scripts/review-mark.js` 在评审完成时写入,内含评审时刻的 diff 指纹——改动未评审、或评审之后又有新 `.java` 改动(指纹不匹配)即阻断;ocr CLI 缺失时按 `failureMode` 降级(`open`=留痕放行/`strict`=拒绝)。
+- **Stop(回合末)**:格式化自动修复(google-java-format)+ 可选深度扫描 + **评审提醒**——同步跑 `ocr delegate preview`,把文件清单与规则预注入上下文(best-effort,送达依赖宿主),并落 hook-state 供 git 门比对;清单超过 `performance.stopMaxFiles`(默认 30)时截断,超额部分标注 partial/INCONCLUSIVE,提示分批评审。
+- PostToolUse(Edit|Write)对 `.java` 只做队列标记、不做检查(省去每次编辑的外部进程开销),检查收敛到回合级 delegate 评审。
 
-相关配置(`scripts/hook-config.json`):`failureMode`(open/strict)、`feedback`(important/quiet)、`performance.gitGateMaxFiles`。
+**信任模型(如实)**:git 门是"标记校验"而非"客观复检"——防遗忘、防偷懒,不防伪造(AI 理论上可手写标记或改 hook 脚本自毁门禁;这与引入前"AI 可绕过静态分析工具"是同级风险)。真正的确定性兜底是交付前的 pom 三类检查与 AI 全量评审流程。
 
-## 6. 接入已有代码的项目(存量工程)
+## 4. 接入已有代码的项目(存量工程)
 
-机制上天然适配存量项目:**编辑期只查改动的文件**(改哪治哪,不会对全库扫违规);但接入时注意四点:
+机制天然适配存量项目:**编辑期只评审改动的文件**(改哪治哪,不对全库扫违规);接入时注意四点:
 
 1. **AGENTS.md 不覆盖**:推送/拷贝到已有项目时,若目标已有自己的 AGENTS.md,安装器会跳过(它是项目身份文件);需要模板的质量约定请把相关条目人工合并进去。
-2. **只拷核心也行**:已有约定的项目可以只拷 `.zcode/` + `scripts/`(+ `.tools/`),不带 AGENTS.md/docs。
-3. **存量改动的首次噪音**:第一次编辑某个老文件时,该文件的历史遗留违规会随回灌出现(增量治理的特性而非误报);台账会去重,修不修按团队节奏。
-4. **Stop 复查上限**:git 脏文件很多时,回合末复查按 `performance.stopMaxFiles`(默认 30)截断,超额部分标注 partial/INCONCLUSIVE——大仓库可调大或分批提交。**非 git 项目两张网缺一**:无 `.git` 时 git 脏文件网恒空,回合末复查只覆盖本回合经 Write/Edit/MultiEdit 触碰的文件——构建插件、代码生成器等其它途径的重写不进回合末复查(仍由 `mvn verify`/CI 收敛),建议项目 git 化。
-5. **交付门禁照旧**:pom 里没配三类检查的,按 `docs/CODE_QUALITY_TOOLS.md` 在首个交付前补齐。
+2. **只拷核心也行**:已有约定的项目可以只拷 `.zcode/` + `.claude/` + `.opencodereview/` + `scripts/`(+ `.tools/`),不带 AGENTS.md/docs。
+3. **存量改动的首次噪音**:第一次评审某个老文件时,该文件的历史遗留问题会随报告出现(增量治理的特性而非误报);修不修按团队节奏,报告只覆盖改动行,历史问题仅作上下文。
+4. **非 git 项目评审退化**:无 `.git` 时 `ocr delegate preview` 与 Git 门都失效(前者依赖 git diff),回合级评审退化为提醒 + 纪律,交付前 pom 检查兜底(见第 5 节);建议项目 git 化。
+5. **交付门禁照旧**:pom 里没配三类检查的,按 `docs/CODE_QUALITY_TOOLS.md` 在首个交付前补齐;交付前 AI 全量评审按 `docs/RELEASE_PROCESS.md` 执行。
 
-## 7. 已知取舍与边界
+## 5. 已知取舍与边界
 
 **门禁词法的已知取舍**(代码审查实测归档):
-- 测试夹具/注释里的示例口令字面量会被写入前门 deny(宁误报取向);需要密钥样本时放 `src/test/resources` 等非 .java 位置,或临时 `formatter`/门禁开关调整——未来可加 `allowlistPaths` 豁免。
-- 词法门禁有漏检面:`cp template.txt A.java`、`perl -pi -e`、`node -e fs.writeFileSync`、`sed --in-place`(长参)不拦——由 Stop 的 git 兜底复查与 Git 提交门收敛,风险限于回合内延迟发现。
-- `sk-` 前缀正则可能误拦 ≥20 字符的普通 slug(如 `sk-frontend-registry-cache-key`);`authToken`/`db_password` 等复合名漏检(由 PMD security 层兜底)。
+- 测试夹具/注释里的示例口令字面量会被写入前门 deny(宁误报取向);需要密钥样本时放 `src/test/resources` 等非 .java 位置,或临时调整门禁开关。
+- 词法门禁有漏检面:`cp template.txt A.java`、`perl -pi -e`、`node -e fs.writeFileSync`、`sed --in-place`(长参)不拦——由回合级评审与 Git 门收敛,风险限于回合内延迟发现。
+- `sk-` 前缀正则可能误拦 ≥20 字符的普通 slug(如 `sk-frontend-registry-cache-key`);`authToken`/`db_password` 等复合名漏检(由评审规则兜底)。
 - Edit 模式下高危行号是 new_string 内的相对行号,与文件实际行号可能不符。
-- finding 台账按"文件+行号+规则"记键:文件顶部插/删行会使旧键失效,该轮表现为一次全量重灌+误记 FIXED,下一轮自愈;中期升级为"违规行内容指纹"。
-- touched-files 队列无 TTL:Stop 长期不运行时陈旧条目会累积并挤占 `stopMaxFiles` 名额。
-- MultiEdit 工具的 edits[] 数组不经写入前高危检测(PostToolUse/Stop 兜底)。
+- MultiEdit 工具的 edits[] 数组不经写入前高危检测(回合级评审兜底)。
 
-## 8. 多宿主接入(ZCode 与 Claude Code)
+**评审链路的已知取舍**:
+- LLM 评审非确定:同一代码两次评审的发现可能不同;漏检由交付前 pom 三类检查兜底。
+- 污点分析弱于字节码级工具(SpotBugs+FindSecBugs):深层数据流问题编辑期评审可能看不到,需要时开第 2 节深度扫描。
+- 评审状态标记防惰性不防伪造(信任模型见第 3 节)。
+- **无 `.git` 的项目退化**:git 门恒空、`ocr delegate preview` 无法运行——编辑期评审退化为提醒 + 纪律,构建插件/代码生成器等其它途径的重写也不进评审视野,由 `mvn verify`/CI 收敛,建议项目 git 化。
+- `ocr` 上游年轻:本机制只依赖 preview/rule 的 stdout 契约,上游破坏性变更的影响面=清单与规则的取法(有降级路径),评审本身不受影响。
+
+## 6. 多宿主接入(ZCode 与 Claude Code)
 
 资产自带两份宿主配置,**并存互不干扰**(各宿主只认自己的文件):`.zcode/config.json`(ZCode)与 `.claude/settings.json`(Claude Code),指向同一个 `scripts/hook-runner.js`——runner 自动识别两家的项目目录变量。
 
@@ -105,6 +114,7 @@
 | deny 输出形状 | `{decision:"deny",reason}` + exit 2 | `hookSpecificOutput.permissionDecision:"deny"` + exit 0(顶层 `decision` 仅收 approve/block,legacy 形状会被 schema 校验拒绝并 fail-open) |
 | 首次生效/审核 | 工作区信任弹窗(见 scripts/README FAQ 的恢复手册) | Claude Code 对项目 settings 中的 hooks 有自己的确认提示,机制不同 |
 | matcher 别名 | ApplyPatch→Write/Edit | 另有 MultiEdit 工具(matcher 已含);Windows 的 shell 工具名为 **PowerShell**(无 Bash 工具),命令门 matcher 已含 `Bash\|PowerShell` |
+| 斜杠命令 | 未经证实能否加载 `.claude/commands/` | `/delegate-review`(评审命令,`ocr` CLI 驱动,与 hook 无绑定) |
 
 **实测状态(如实)**:ZCode 侧已实证——引擎触发、写入前 deny、PostToolUse 回灌、Stop 的动作链(格式化改写、台账写入、队列清空);**但 Stop 的 additionalContext 提示在一次实测中未注入模型上下文**(文件确被格式化改写,模型却未收到"已自动格式化"提示;单次观测,复测待做)。在结论明确前,不要把"没看到 Stop 提示"当作"文件没被改写"的信号——回合结束后继续编辑前,先重新 Read 相关文件,否则 Edit 可能匹配失败。候选对策(仅 ZCode 宿主需要;Claude Code 已实证送达,若实现须按宿主区分,避免正常送达时重复打扰):Stop 把"已自动格式化"通知写入 hook-state,由下一次 PostToolUse 在回灌开头转告,绕开 Stop 送达通道。Claude Code 侧**真机已验**(Windows,claude CLI 2.1 无头模式,PowerShell 宿主):PostToolUse 回灌逐字送达模型;Stop additionalContext 以 `hook_additional_context` 注入并**驱动模型续回合**(与 ZCode 相反,送达通道完好);曾发现两层问题并已修复:① Windows Claude Code 无 Bash 工具、shell 为 PowerShell,matcher 未含时防旁路门完全空转(`echo > x.java` 真机落盘)——matcher 增补 `PowerShell` + runner 增补 cmdlet 检测;② 复测又暴露 deny 输出为 legacy 形状,被 v2.1.278 的 schema 校验整体拒绝且 fail-open 放行(deny 分支在该宿主从未真正生效)——deny 已按宿主分派(见上表)。两修后真机复测:两种 PowerShell 旁路均被拦下、拒绝理由送达模型。另注意:PowerShell `>` 重定向写文件自带 UTF-8 BOM。
 

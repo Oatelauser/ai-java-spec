@@ -4,28 +4,32 @@
 /*
  * 项目级质量 hook runner —— ZCode PostToolUse / Stop 事件的统一入口。
  *
- * 检查项(全部由 scripts/hook-config.json 开关/换版本,脚本本身零版本感知):
+ * 确定性检查项(全部由 scripts/hook-config.json 开关/换版本,脚本本身零版本感知):
  *   formatter  google-java-format(style 可配 aosp/google),回合末统一自动修复
- *   convention PMD 规则集(默认 PMD7 quickstart;可切 PMD6.55 + p3c 阿里规约)
- *   security   PMD security 分类(与 convention 同一条 per-file 秒级链路,浅层源码检查)
  *   deepScan   可选:编译后 SpotBugs+FindSecBugs 字节码扫描(默认关,仅 Stop 层)
  *
- * 增量策略:PostToolUse 对刚编辑的单个 .java 做只读检查(CLI 直调,不重写文件);
- *           Stop 聚合本回合 touched files,统一格式化(重写)+ 复查,兜住 Bash 写文件等绕过路径。
+ * 规范/安全/逻辑评审由 open-code-review(ocr)delegate 模式承担(宿主模型、零 API key):
+ *   PostToolUse 对 .java 只入队(不再起 JVM 检查,省去每次编辑的增量扫描成本);
+ *   Stop 同步跑 `ocr delegate preview`(零 LLM)取可评审清单注入回灌,提醒完成评审;
+ *   评审完成后由 scripts/review-mark.js 写 diff 指纹标记,git 门(bash-gate)对
+ *   commit/push 校验标记指纹——未评审或评审后又有改动即阻断。ocr 缺失时按 failureMode 降级。
+ *
+ * 增量策略:Stop 聚合本回合 touched files,统一格式化(重写)+ deepScan,兜住 Bash 写文件等绕过路径。
  *           格式化重写刻意只在回合末做:编辑中途重写会立刻作废 agent 的文件缓存
  *           (连续撞 Edit 的 modified-since-read 护栏),并误删增量编辑中间态的无引用 import。
  *
  * 反馈协议(实测校准):有违规或发生自动格式化 → stdout 输出 additionalContext JSON 注入会话回灌给 agent
  *           (PostToolUse 的 stderr/exit2 通道不注入,勿改回);干净 → 静默;runner 自身故障 → 留痕不阻塞。
  *
- * 环境要求:JAVA_HOME(JDK 11+,仅作为工具 JVM,与项目 JDK 版本解耦);首次运行需联网下载工具到 .tools/。
+ * 环境要求:JAVA_HOME(JDK 11+,仅 formatter/deepScan 的工具 JVM,与项目 JDK 版本解耦);
+ *           首次运行需联网下载工具到 .tools/;ocr CLI 需自行安装
+ *           (npm install -g @alibaba-group/open-code-review),缺失时按 failureMode 降级。
  */
 
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
-const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 // 沙箱/代理环境常设 NODE_TLS_REJECT_UNAUTHORIZED=0,node 会往 stderr 打警告污染 hook 回灌,压掉
@@ -35,11 +39,13 @@ process.removeAllListeners('warning');
 const ROOT = process.env.ZCODE_PROJECT_DIR
   || process.env.CLAUDE_PROJECT_DIR
   || path.resolve(__dirname, '..');
+// diff 指纹单一事实源:review-mark.js 兼作模块导出 computeFingerprint,git 门复用同一实现,杜绝两处漂移
+const { computeFingerprint } = require('./review-mark.js');
 const TOOLS_DIR = path.join(ROOT, '.tools');
 const STATE_DIR = path.join(TOOLS_DIR, 'hook-state');
 const QUEUE_FILE = path.join(STATE_DIR, 'touched-files.txt');
-const LEDGER_FILE = path.join(STATE_DIR, 'findings.json');
-const LEDGER_HISTORY = path.join(STATE_DIR, 'findings-history.log');
+const PREVIEW_FILE = path.join(STATE_DIR, 'ocr-preview.txt');
+const REVIEW_MARK_FILE = path.join(STATE_DIR, 'ocr-review.json');
 const IS_WIN = process.platform === 'win32';
 
 const cfg = loadConfig();
@@ -59,7 +65,7 @@ async function main() {
 }
 
 // 预热:只做工具下载/解压,不检查任何文件。init 新项目后手动跑一次,
-// 把首跑约 70MB 的下载成本从"第一次编辑"挪到"项目初始化",下载问题也能当场暴露。
+// 把下载成本从"第一次编辑"挪到"项目初始化",下载问题也能当场暴露。
 async function handleWarmup() {
   announceDownloads = true;
   ensureGitignoreIgnoresTools();
@@ -72,10 +78,6 @@ async function handleWarmup() {
     );
     console.log(`[warmup] google-java-format ${cfg.formatter.version} 就绪: ${path.relative(ROOT, jar)}`);
   }
-  if (cfg.convention && cfg.convention.enabled) {
-    const home = await ensurePmd(cfg.convention);
-    console.log(`[warmup] PMD ${cfg.convention.version} 就绪: ${path.relative(ROOT, home)}`);
-  }
   if (cfg.deepScan && cfg.deepScan.enabled) {
     const home = await ensureSpotBugs();
     console.log(`[warmup] SpotBugs ${cfg.deepScan.spotbugsVersion} 就绪: ${path.relative(ROOT, home)}`);
@@ -87,7 +89,7 @@ async function handleWarmup() {
 // ---------------------------------------------------------------- 事件处理
 
 // 写入前高危门(借鉴 mimosa 的分级响应:只有"确定性高危"才 deny,规范类仍走事后回灌)。
-// 刻意用毫秒级正则而非 PMD:写入前门的性能契约是秒级预算的百分之一,重引擎留给 PostToolUse。
+// 刻意用毫秒级正则而非外部引擎:写入前门的性能契约是秒级预算的百分之一,重检查留给 Stop 层。
 const HIGH_RISK_PATTERNS = [
   { name: '私钥内容', re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/ },
   // 负向环视排除 !=/>=/==/+= 等复合运算符:比较口令与字面量(if (password != "x"))是合法代码,不是硬编码
@@ -129,8 +131,9 @@ async function handleBashGate() {
   }
   // git 必须处于命令位(行首/操作符之后),且 commit/push 是子命令位——
   // 否则 "echo git commit"、"git log --grep commit" 这类文本会被误触发;
-  // 参数段允许"带值参数"(如 -C dir)出现在子命令之前
-  if (/(?:^|[;&|(`$]\s*)git\s+(?:-[^\s]+(?:\s+[^\s-]\S*)?\s+)*(?:commit|push)\b/.test(cmd)) return gitGate();
+  // 参数段允许"带值参数"(如 -C dir)出现在子命令之前。
+  // 大小写不敏感:Windows 下 Git.exe 同样可执行,Git/GIT commit 不能绕过
+  if (/(?:^|[;&|(`$]\s*)git\s+(?:-[^\s]+(?:\s+[^\s-]\S*)?\s+)*(?:commit|push)\b/i.test(cmd)) return gitGate();
   return 0;
 }
 
@@ -141,40 +144,73 @@ function detectShellWriteBypass(cmd) {
   if (/\bsed\b[^&|;\n]*\s-i/.test(cmd)) return 'sed 就地修改 .java';
   if (/\btee\b[^&|;\n]*\S*\.java(?![.\w])/.test(cmd)) return 'tee 写入 .java';
   // PowerShell 宿主(Claude Code Windows 的 shell 工具)的写入形态;
-  // cmdlet 后要求空白+可选参数再接 .java,避免把"读一个名叫 out-file.java 的文件"误判
-  if (/\b(?:out-file|set-content|add-content)\s+(?:-[a-z]+\s+)*\S*\.java(?![.\w])/i.test(cmd)) return 'PowerShell cmdlet 写入 .java';
-  if (/\bwriteall(?:text|lines|bytes)\b[^&|;\n]*\.java/i.test(cmd)) return '.NET WriteAll* 写入 .java';
+  // 参数须支持"带独立值"形态(Out-File -Encoding utf8 A.java / Add-Content -Value x A.java)。
+  // 无法枚举每个 cmdlet 的值参数表,退而允许"-名 值?"的受限重复——回溯使两种切分都可命中;
+  // B15 语义(读 .java 写 .txt 不误伤)由 .java 后顾断言兜住。残余歧义(如 -InputObject A.java out.txt
+  // 把 A.java 误当输出目标)接受:防旁路宁可偶有误报,读 .java 的常规管道形态不受影响
+  if (/\b(?:out-file|set-content|add-content)\s+(?:-[a-z]+(?:\s+\S+)?\s+)*\S*\.java(?![.\w])/i.test(cmd)) return 'PowerShell cmdlet 写入 .java';
+  if (/\b(?:write|append)all(?:text|lines|bytes)\b[^&|;\n]*\.java/i.test(cmd)) return '.NET WriteAll*/AppendAll* 写入 .java';
   return null;
 }
 
-// Git 提交/推送门:改动的 .java 必须通过 PMD 才放行;文件数超上限时按失败模式降级
+// Git 提交/推送门:本批 .java 必须已完成回合评审——ocr-review.json 里的 diff 指纹
+// 须与当前工作区重算一致(无标记=没评审过;不匹配=评审后又有改动),否则 deny。
+// 这是"标记校验"而非旧的 PMD 客观复检:门禁本身零外部成本,不再设文件数上限;
+// 防遗忘/偷懒,不防伪造(与整个门禁体系同一信任模型)。
+// ocr CLI 缺失 = 评审链路整体不可用:open 模式 stderr 留痕放行,strict 模式 fail-closed。
 function gitGate() {
   if (!fs.existsSync(path.join(ROOT, '.git'))) return 0;
   const changed = gitChangedJavaFiles();
   if (changed.length === 0) return 0;
 
-  const cap = (cfg.performance && cfg.performance.gitGateMaxFiles) || 20;
-  if (changed.length > cap) {
+  if (!findOcr()) {
     if (isStrict()) {
-      return deny(`[quality-hook] Git 门禁:改动 .java 共 ${changed.length} 个,超过上限 ${cap},strict 模式拒绝放行;请分批提交或调整 performance.gitGateMaxFiles`);
+      return deny('[quality-hook] Git 门禁:strict 模式下未检测到 ocr CLI,评审链路不可用,阻断;安装: npm install -g @alibaba-group/open-code-review');
     }
-    console.error(`[quality-hook] Git 门禁:改动 .java 共 ${changed.length} 个超过 ${cap},本轮跳过检查(partial/INCONCLUSIVE)`);
+    console.error('[quality-hook] Git 门禁:未检测到 ocr CLI,评审标记校验跳过(partial/INCONCLUSIVE;安装: npm install -g @alibaba-group/open-code-review)');
     return 0;
   }
-  const result = { violations: [], notes: [], fixed: [] };
-  return runPmd(changed, result).then(() => {
-    // notes 必须留痕(stderr 进日志可查);strict 模式下检查未完全就绪按 fail-closed 阻断,兑现 strict 承诺
-    result.notes.forEach(n => console.error(`[quality-hook] ${n}`));
-    if (isStrict() && result.notes.length > 0) {
-      return deny(['[quality-hook] Git 门禁:strict 模式下检查未完全就绪,阻断(fail-closed)', ...result.notes.slice(0, 3)].join('\n'));
-    }
-    if (result.violations.length === 0) return 0;
-    return deny([
-      `[quality-hook] Git 门禁:改动代码存在 ${result.violations.length} 处未修复违规,已阻断提交/推送`,
-      ...result.violations.slice(0, 5),
-      '请修复后重试;规则集与开关见 scripts/hook-config.json。',
-    ].join('\n'));
-  });
+
+  const mark = readReviewMark();
+  if (!mark) {
+    return deny('[quality-hook] Git 门禁:本批 .java 未经回合评审,请运行评审命令完成本轮评审(见 .claude/commands/delegate-review.md),完成后 node scripts/review-mark.js done');
+  }
+  // 能列出 changed 说明 git 可用,指纹算不出来按不匹配处理(fail-closed);失败原因留痕
+  let current = null;
+  try {
+    current = computeFingerprint(ROOT);
+  } catch (e) {
+    console.error(`[quality-hook] Git 门禁:指纹重算失败(${e.message}),按不匹配处理`);
+  }
+  if (!current || current !== mark.fingerprint) {
+    return deny('[quality-hook] Git 门禁:本批 .java 在评审标记后又有改动(指纹不匹配),请重新运行评审命令完成本轮评审(见 .claude/commands/delegate-review.md),完成后 node scripts/review-mark.js done');
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------- ocr CLI 探测与评审状态
+
+// 探测 ocr 是否在 PATH(spawnSync 跑 --version,10s 超时),返回可直接交给 run() 的命令名。
+// 刻意不解析 `where` 的输出:where 经管道输出非 ASCII 路径时用系统 OEM 代码页(中文系统=GBK),
+// node 按 utf8 读成乱码,拿去执行必失败;而按名称执行让 cmd.exe 自己按 PATH(UTF-16)解析,
+// 中文项目路径/中文 PATH 目录都不受影响。Windows 下 npm 全局装出 ocr.cmd、Go 直装是 ocr.exe,都探
+function findOcr() {
+  if (!IS_WIN) return run('ocr', ['--version'], { timeoutMs: 10000 }).status === 0 ? 'ocr' : null;
+  for (const candidate of ['ocr.cmd', 'ocr.exe']) {
+    if (run(candidate, ['--version'], { timeoutMs: 10000 }).status === 0) return candidate;
+  }
+  return null;
+}
+
+// 读取评审标记;文件不存在/损坏/缺 fingerprint 一律按"未标记"处理
+function readReviewMark() {
+  try {
+    if (!fs.existsSync(REVIEW_MARK_FILE)) return null;
+    const mark = JSON.parse(fs.readFileSync(REVIEW_MARK_FILE, 'utf8'));
+    return mark && typeof mark.fingerprint === 'string' ? mark : null;
+  } catch {
+    return null;
+  }
 }
 
 // PreToolUse 的拒绝,按宿主分派输出形状(两宿主均真机校准):
@@ -201,6 +237,9 @@ function isStrict() {
   return (cfg.failureMode || 'open') === 'strict';
 }
 
+// PostToolUse 只做队列标记 + .gitignore 兜底:.java 的规范/安全检查已整体交给
+// Stop 层的 OCR delegate 评审(评审清单由 preview 取,修复由评审命令驱动)。
+// 刻意不在每次编辑起检查:编辑期中间态(未使用 import/半成品)本就评不出意义。
 async function handlePostToolUse() {
   const input = readStdinJson();
   const file = input && input.tool_input && input.tool_input.file_path;
@@ -209,8 +248,7 @@ async function handlePostToolUse() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.appendFileSync(QUEUE_FILE, normalizeSlashes(file) + '\n');
   ensureGitignoreIgnoresTools();
-
-  return report(await checkFiles([path.resolve(ROOT, file)], { format: false, deepScan: false }), '编辑后单文件增量检查');
+  return 0;
 }
 
 async function handleStop() {
@@ -218,41 +256,57 @@ async function handleStop() {
   if (files.length === 0) return 0;
   ensureGitignoreIgnoresTools();
 
-  // 存量项目 git 脏文件可能很多,复查设上限防止 Stop 超时(队列文件优先,超额部分如实标注)
+  // 存量项目 git 脏文件可能很多,聚合处理设上限防止 Stop 超时(队列文件优先,超额部分如实标注)
   const cap = (cfg.performance && cfg.performance.stopMaxFiles) || 30;
   const skipped = Math.max(0, files.length - cap);
   const checked = skipped > 0 ? files.slice(0, cap) : files;
 
-  const result = await checkFiles(checked, { format: true, deepScan: cfg.deepScan && cfg.deepScan.enabled });
+  const result = { violations: [], notes: [], fixed: [], reminders: [] };
+  if (cfg.formatter && cfg.formatter.enabled) await runFormatter(checked, result);
+  if (cfg.deepScan && cfg.deepScan.enabled) await runDeepScan(result);
   if (skipped > 0) result.notes.push(`另有 ${skipped} 个改动文件未复查(超过 performance.stopMaxFiles=${cap},partial/INCONCLUSIVE)`);
-  applyFindingLedger(result, checked);
+  attachOcrReviewReminder(result);
   clearQueue();
   return report(result, `回合聚合复查(${checked.length} 个 .java)`);
 }
 
-// ---------------------------------------------------------------- 检查链路
+// ---------------------------------------------------------------- ocr delegate 评审提醒(Stop 层)
 
-async function checkFiles(files, opts) {
-  const result = { violations: [], notes: [], fixed: [] };
-  // 格式化重写只允许发生在回合末(opts.format):编辑中途重写会作废 agent 缓存、误删中间态 import
-  if (opts.format && cfg.formatter && cfg.formatter.enabled) await runFormatter(files, result);
-  if ((cfg.convention && cfg.convention.enabled) || (cfg.security && cfg.security.enabled)) {
-    // PostToolUse 同理容忍"未使用类"中间态:单次编辑看不到整个回合的意图,Stop 全量兜底
-    const suppress = opts.format ? [] : ((cfg.postToolUse && cfg.postToolUse.suppressRules) || EDIT_TIME_SUPPRESSED_RULES);
-    await runPmd(files, result, suppress);
+// 两档提醒:ocr 在 PATH → 同步跑 `ocr delegate preview`(纯清单计算,零 LLM 成本),
+// 可评审清单注入回灌 + 原始输出落 hook-state(评审命令直接复用,免重跑);
+// ocr 缺失 → 降级提示安装命令。preview 失败留痕降级为纯文字提醒,绝不阻塞 Stop。
+function attachOcrReviewReminder(result) {
+  const ocr = findOcr();
+  if (!ocr) {
+    result.reminders.push('[quality-hook] 未检测到 ocr,编辑期评审跳过;安装: npm install -g @alibaba-group/open-code-review');
+    return;
   }
-  if (opts.deepScan) await runDeepScan(result);
-  return result;
-}
 
-// 编辑期默认容忍的规则:声明的 import/字段/变量常在"下一次编辑"才被使用
-const EDIT_TIME_SUPPRESSED_RULES = [
-  'UnnecessaryImport',
-  'UnusedPrivateField',
-  'UnusedLocalVariable',
-  'UnusedPrivateMethod',
-  'UnusedFormalParameter',
-];
+  let preview = '';
+  try {
+    const r = run(ocr, ['delegate', 'preview'], { timeoutMs: 60000 });
+    if (r.error) throw new Error(r.error.message);
+    if (r.status !== 0) throw new Error(`exit=${r.status} ${brief(r.stderr || r.stdout)}`);
+    preview = (r.stdout || '').trim();
+  } catch (e) {
+    result.notes.push(`ocr delegate preview 失败(已降级为纯提醒): ${e.message}`);
+    result.reminders.push('[quality-hook] 请运行评审命令完成本轮评审,完成后 node scripts/review-mark.js done');
+    return;
+  }
+
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(PREVIEW_FILE, preview + '\n');
+  } catch {
+    // 落盘失败只影响评审命令复用 preview,不影响提醒本身
+  }
+  const digest = preview ? preview.split(/\r?\n/).slice(0, 20).join('\n').slice(0, 1200) : '(preview 无输出)';
+  result.reminders.push([
+    `[quality-hook] 本回合可评审文件清单(ocr delegate preview,完整输出: ${path.relative(ROOT, PREVIEW_FILE)}):`,
+    digest,
+    '请运行评审命令完成本轮评审,完成后 node scripts/review-mark.js done',
+  ].join('\n'));
+}
 
 async function runFormatter(files, result) {
   const jar = await ensureTool(
@@ -285,42 +339,6 @@ async function runFormatter(files, result) {
     result.fixed.push(...files);
   } else {
     result.violations.push(`多轮格式化后仍未通过复验(多为语法错误,请先修正): ${brief(verify.stderr || verify.stdout, 5)}`);
-  }
-}
-
-async function runPmd(files, result, suppressedRules = []) {
-  const conv = cfg.convention || {};
-  const rulesets = [conv.enabled && conv.rulesets, cfg.security && cfg.security.enabled && cfg.security.rulesets]
-    .filter(Boolean)
-    .join(',');
-  if (!rulesets) return;
-
-  const home = await ensurePmd(conv).catch(e => result.notes.push(`PMD 就绪失败(已跳过): ${e.message}`) && null);
-  if (!home) return;
-
-  // 缓存文件必须随"版本+规则集组合"隔离,否则 PMD 增量缓存会跨组合给出过期结论
-  const cacheKey = crypto.createHash('md5').update(`${conv.version}|${rulesets}`).digest('hex').slice(0, 12);
-  const cacheFile = path.join(TOOLS_DIR, 'pmd-cache', `${cacheKey}.cache`);
-  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-
-  // PMD 7 用 `pmd check` 子命令语法;PMD 6 只有裸选项,且不认 --use-version
-  const isPmd6 = /^6\./.test(conv.version);
-  const args = [];
-  if (!isPmd6) args.push('check', '--no-progress');
-  args.push('-f', 'text', '-R', rulesets, '-d', files.join(','), '--cache', cacheFile);
-  if (cfg.javaLanguageLevel && !isPmd6) args.push('--use-version', `java-${cfg.javaLanguageLevel}`);
-
-  const r = runPmdScript(home, args, { timeoutMs: 180000 });
-  if (r.status === 0) return;
-  if (r.status === 4) {
-    const hits = (r.stdout || '').split(/\r?\n/).filter(l => /^\S+:\d+:\s+\S/.test(l));
-    const visible = suppressedRules.length > 0
-      ? hits.filter(l => !suppressedRules.some(rule => new RegExp(`(?:^|\\s)${rule}:\\s`).test(l)))
-      : hits;
-    result.violations.push(...visible.slice(0, 12).map(l => `[PMD] ${l.trim().slice(0, 200)}`));
-    if (visible.length > 12) result.violations.push(`[PMD] ...另有 ${visible.length - 12} 条违规(规则集: ${rulesets})`);
-  } else {
-    result.notes.push(`PMD 执行异常 exit=${r.status}: ${brief(r.stderr || r.stdout)}`);
   }
 }
 
@@ -360,15 +378,18 @@ async function runDeepScan(result) {
 // ---------------------------------------------------------------- 汇报与退出
 
 function report(result, header) {
-  // feedback=quiet 时压掉非风险信息(格式化提示/备注),只留违规本身
+  // feedback=quiet 时压掉非风险信息(格式化提示/备注),只留违规本身;
+  // reminders(评审提醒)是 git 门的心跳信号,quiet 下也保留
   const quiet = cfg.feedback === 'quiet';
+  const reminders = result.reminders || [];
   const hasProblem = result.violations.length > 0 || (!quiet && result.fixed.length > 0);
-  if (!hasProblem && (quiet || result.notes.length === 0)) return 0;
+  if (!hasProblem && reminders.length === 0 && (quiet || result.notes.length === 0)) return 0;
 
   const lines = [`[quality-hook] ${header}`];
   if (!quiet && result.fixed.length > 0) {
     lines.push(`已自动格式化 ${result.fixed.length} 个文件(内容已变化,后续编辑前请重新 Read 完整文件——只读部分会让 Edit 匹配失败): ${result.fixed.map(f => path.basename(f)).join(', ')}`);
   }
+  lines.push(...reminders);
   lines.push(...result.violations);
   if (result.violations.length > 0) lines.push('请修复上述违规后重试;规则集与开关见 scripts/hook-config.json。');
   if (!quiet) lines.push(...result.notes);
@@ -407,66 +428,7 @@ function collectTouchedFiles() {
 }
 
 function clearQueue() {
-  if (fs.existsSync(QUEUE_FILE)) fs.rmSync(QUEUE_FILE, { force: true });
-}
-
-// ---------------------------------------------------------------- finding 台账(借鉴 mimosa)
-
-// Stop 复查的去重与状态化:同一条违规(文件+行+规则)只完整回灌一次,
-// 之后只在台账里续期,不再刷屏;本轮未再出现的同文件旧 finding 判定为已修复,写入不可覆盖历史。
-function applyFindingLedger(result, checkedFiles) {
-  let ledger = { version: 1, findings: {} };
-  try {
-    if (fs.existsSync(LEDGER_FILE)) ledger = JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8'));
-  } catch {
-    ledger = { version: 1, findings: {} };
-  }
-  const checked = new Set(checkedFiles.map(normalizeSlashes));
-  const now = new Date().toISOString();
-  const currentKeys = new Set();
-
-  const kept = [];
-  let knownCount = 0;
-  for (const v of result.violations) {
-    const m = /^\[PMD\]\s+(.+?):(\d+):\s+(\S+):/.exec(v);
-    if (!m) {
-      kept.push(v); // SpotBugs 等其它来源不进台账,原样保留
-      continue;
-    }
-    const [, file, line, rule] = m;
-    const key = crypto.createHash('md5').update(`${normalizeSlashes(file)}|${line}|${rule}`).digest('hex');
-    currentKeys.add(`${normalizeSlashes(file)}|${key}`);
-    if (ledger.findings[key]) {
-      ledger.findings[key].lastSeen = now;
-      knownCount++;
-    } else {
-      ledger.findings[key] = { file: normalizeSlashes(file), line: Number(line), rule, firstSeen: now, lastSeen: now };
-      kept.push(v);
-    }
-  }
-
-  const history = [];
-  for (const [key, f] of Object.entries(ledger.findings)) {
-    const isCurrent = currentKeys.has(`${f.file}|${key}`);
-    const fileWasChecked = checked.has(f.file);
-    if (!isCurrent && fileWasChecked) {
-      history.push(`FIXED ${now} ${f.file}:${f.line} ${f.rule} (firstSeen ${f.firstSeen})`);
-      delete ledger.findings[key];
-    }
-  }
-
-  if (knownCount > 0) {
-    kept.push(`[PMD] 另有 ${knownCount} 条此前已报告、本轮未变化的违规不再重复列出(台账: ${path.relative(ROOT, LEDGER_FILE)})`);
-  }
-  result.violations = kept;
-
-  try {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-    fs.writeFileSync(LEDGER_FILE, JSON.stringify(ledger, null, 2));
-    if (history.length > 0) fs.appendFileSync(LEDGER_HISTORY, `${history.join('\n')}\n`);
-  } catch {
-    // 台账失败不影响回灌主流程
-  }
+  rmFile(QUEUE_FILE);
 }
 
 // git 兜底是尽力而为:中文路径在 core.quotepath 下会被转义,失败/为空都不影响队列主线
@@ -517,59 +479,6 @@ function gjfDownloadUrls(version) {
   ];
 }
 
-async function ensurePmd(conv) {
-  const version = conv.version;
-  const installDir = path.join(TOOLS_DIR, 'pmd', `pmd-${version}`);
-  let script = findInHome(installDir, 'pmd');
-  if (!script) {
-    const dir = path.join(TOOLS_DIR, 'pmd');
-    const zip = path.join(dir, `pmd-${version}.zip`);
-    // 手动放置的发行包常保留官方原始文件名(pmd-dist-<v>-bin.zip / pmd-bin-<v>.zip),同样识别
-    let src = [
-      zip,
-      path.join(dir, `pmd-dist-${version}-bin.zip`),
-      path.join(dir, `pmd-bin-${version}.zip`),
-    ].find(p => fs.existsSync(p));
-    if (!src) {
-      await ensureTool(
-        zip,
-        [
-          `https://github.com/pmd/pmd/releases/download/pmd_releases%2F${version}/pmd-dist-${version}-bin.zip`,
-          `https://github.com/pmd/pmd/releases/download/pmd_releases%2F${version}/pmd-bin-${version}.zip`,
-          `https://repo1.maven.org/maven2/net/sourceforge/pmd/pmd-dist/${version}/pmd-dist-${version}-bin.zip`,
-        ],
-        `PMD ${version}`,
-      );
-      src = zip;
-    }
-    extractArchive(src, installDir);
-    script = findInHome(installDir, 'pmd');
-    if (!script) throw new Error(`PMD ${version} 解压后未找到 bin/pmd`);
-  }
-  const home = launcherHome(script);
-
-  // p3c 规则集只兼容 PMD6,且含 Kotlin 实现的规则:standalone PMD 需同时放入
-  // p3c jar 与 kotlin-stdlib(Maven 环境里是传递依赖,CLI 环境必须显式带上),见 hook-config.pmd6-p3c.json
-  if (conv.p3cVersion) {
-    const p3cDeps = [
-      [`p3c-pmd-${conv.p3cVersion}.jar`, `com/alibaba/p3c/p3c-pmd/${conv.p3cVersion}/p3c-pmd-${conv.p3cVersion}.jar`],
-    ];
-    if (conv.p3cKotlinVersion) {
-      p3cDeps.push(
-        [`kotlin-stdlib-${conv.p3cKotlinVersion}.jar`, `org/jetbrains/kotlin/kotlin-stdlib/${conv.p3cKotlinVersion}/kotlin-stdlib-${conv.p3cKotlinVersion}.jar`],
-        [`kotlin-stdlib-jdk8-${conv.p3cKotlinVersion}.jar`, `org/jetbrains/kotlin/kotlin-stdlib-jdk8/${conv.p3cKotlinVersion}/kotlin-stdlib-jdk8-${conv.p3cKotlinVersion}.jar`],
-      );
-    }
-    for (const [name, path664] of p3cDeps) {
-      const jarPath = path.join(home, 'lib', name);
-      if (!fs.existsSync(jarPath)) {
-        await ensureTool(jarPath, [`https://repo1.maven.org/maven2/${path664}`], name);
-      }
-    }
-  }
-  return home;
-}
-
 async function ensureSpotBugs() {
   const ds = cfg.deepScan;
   const installDir = path.join(TOOLS_DIR, 'spotbugs', `spotbugs-${ds.spotbugsVersion}`);
@@ -601,7 +510,7 @@ async function ensureSpotBugs() {
   return home;
 }
 
-// 发行包解压后常带一层 pmd-bin-x.y.z/ 目录,这里返回真正含 bin/ 的那一层
+// 发行包解压后常带一层 spotbugs-x.y.z/ 目录,这里返回真正含 bin/ 的那一层
 function launcherHome(script) {
   return path.dirname(path.dirname(script));
 }
@@ -721,13 +630,13 @@ function renameIntoPlace(tmp, dest) {
   } catch {
     // Windows 上目标被占用时 rename 失败:清掉重试,再不行退回 copy 兜底
     try {
-      fs.rmSync(dest, { force: true });
+      rmFile(dest);
       fs.renameSync(tmp, dest);
       return true;
     } catch {
       try {
         fs.copyFileSync(tmp, dest);
-        fs.rmSync(tmp, { force: true });
+        rmFile(tmp);
         return true;
       } catch {
         return false;
@@ -737,7 +646,7 @@ function renameIntoPlace(tmp, dest) {
 }
 
 function extractArchive(archive, destDir) {
-  if (findInHome(destDir, 'pmd') || findInHome(destDir, 'spotbugs')) return;
+  if (findInHome(destDir, 'spotbugs')) return;
   fs.mkdirSync(destDir, { recursive: true });
   const strategies = [
     ['unzip', ['-o', archive, '-d', destDir]],
@@ -753,7 +662,7 @@ function extractArchive(archive, destDir) {
     if (run(cmd, args, { timeoutMs: 300000 }).status === 0) return;
   }
   // 残缺安装会让 findInHome 命中缺 lib 的目录且永不自愈——失败即清场
-  fs.rmSync(destDir, { recursive: true, force: true });
+  rmTree(destDir);
   throw new Error(`解压失败(已清理残缺目录): ${archive}`);
 }
 
@@ -767,11 +676,6 @@ function run(cmd, args, opts = {}) {
     cwd: opts.cwd || ROOT,
     windowsHide: true,
   });
-}
-
-function runPmdScript(home, args, opts) {
-  const script = IS_WIN ? path.join(home, 'bin', 'pmd.bat') : path.join(home, 'bin', 'pmd');
-  return run(script, args, opts);
 }
 
 function findJava() {
@@ -850,6 +754,32 @@ function ensureGitignoreIgnoresTools() {
 
 function normalizeSlashes(p) {
   return String(p).replace(/\\/g, '/');
+}
+
+// 删除一律走 unlink/rmdir 原生绑定 + 手工递归:node v25.0.0 实测 fs.rm 系
+// (rmSync 任意形态)在 Windows 非 ASCII 路径上静默失效——本模板的项目根常含中文,
+// rmFile/rmTree 保持 force 语义(目标不存在不报错)
+function rmFile(p) {
+  try {
+    fs.unlinkSync(p);
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+  }
+}
+
+function rmTree(p) {
+  let st;
+  try {
+    st = fs.lstatSync(p);
+  } catch {
+    return;
+  }
+  if (st.isDirectory()) {
+    for (const name of fs.readdirSync(p)) rmTree(path.join(p, name));
+    fs.rmdirSync(p);
+  } else {
+    rmFile(p);
+  }
 }
 
 function brief(text, maxLines = 3) {

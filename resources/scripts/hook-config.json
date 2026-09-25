@@ -1,22 +1,10 @@
 {
-  "javaLanguageLevel": "",
   "formatter": {
     "enabled": true,
     "tool": "google-java-format",
     "version": "1.36.1",
     "style": "aosp",
     "autoFix": true
-  },
-  "convention": {
-    "enabled": true,
-    "tool": "pmd",
-    "version": "7.27.0",
-    "rulesets": "rulesets/java/quickstart.xml",
-    "p3cVersion": ""
-  },
-  "security": {
-    "enabled": true,
-    "rulesets": "category/java/security.xml"
   },
   "deepScan": {
     "enabled": false,
@@ -27,7 +15,7 @@
     "threshold": "Medium"
   },
   "performance": {
-    "gitGateMaxFiles": 20
+    "stopMaxFiles": 30
   },
   "failureMode": "open",
   "feedback": "important"

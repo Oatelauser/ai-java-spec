@@ -2,27 +2,32 @@
 'use strict';
 
 /*
- * hook-runner.js 零依赖回归套件。运行:node scripts/selftest.js
+ * hook-runner.js / review-mark.js 零依赖回归套件。运行:node scripts/selftest.js
  *
  * 覆盖矩阵:
  *   pre-tool-use  P1-P11(写入前高危门)
- *   bash-gate     B1-B11(Bash 写 .java 绕过检测 / git 提交门禁)
- *   post-tool-use U1-U7(单文件增量检查 + 编辑期规则抑制)
- *   stop          S1-S7(回合聚合:格式化 / 台账去重 / FIXED / 截断 / 队列清理)
+ *   bash-gate     B1-B8(Bash 写 .java 绕过检测)+ B12-B17(PowerShell/.NET 写入形态,
+ *                 B15 = 读 .java 写 .txt 不误伤的语义钉子)
+ *                 B9-B11(git 评审标记门禁:未标记阻断 / 标记后指纹变化阻断 / 标记匹配放行)
+ *                 B18-B19(内容盲区:标记后仅改未跟踪/已跟踪脏 .java 的内容,指纹须仍漂移)
+ *                 B20(git 命令大小写旁路)+ B21(纯空白改动不漂移指纹,GJF 自动格式化友好)
+ *   review-mark   R1-R3(status 缺失输出 / done-status 往返 / 指纹对工作区变化敏感)
+ *   post-tool-use U1-U4(.java 只入队不再跑检查;.md/忽略路径不入队;append 语义)
+ *   stop          S1-S7(格式化 / ocr preview 注入 / ocr 缺失降级 / 截断 / 队列清理)
  *   协议          J1(post/stop 的 stdout 必须是单个可解析 JSON 且 stderr 为空)
  *   warmup        W1(工具已就绪时秒过)
  *
  * 约定:
  *  - 一律 spawnSync(process.execPath,[runner,mode],{input}) 传 JSON,不走 shell 拼接;
+ *  - ocr 的有无用 PATH 控制:临时目录放 ocr 桩并前插 PATH = 确定性"已安装";
+ *    PATH 置空 = 确定性"未安装"。评审 LLM 的结论不进断言(只断 preview 通道的外壳行为);
  *  - fixture 全部放 .selftest-tmp/,结束删除;测试前备份 .tools/hook-state,结束后还原;
- *  - git 用例临时 git init(hook-lab 原本无 .git),结束 rm -rf .git;
+ *  - git 用例临时 git init + 空初始提交(指纹源含 git diff HEAD,无提交时必败;
+ *    hook-lab 原本无 .git),结束 rm -rf .git;
  *  - P11/B6 是"记录实际行为"用例(疑似误报):只如实记录行为,不以断言迁就,也不计 FAIL。
  *
- * fixture 内容均已对 PMD 7.27.0 quickstart+security 与 google-java-format 1.36.1(aosp)实测校准:
- *   BAD_JAVA  恰好 1 条 EmptyCatchBlock(第 7 行),且本身已符合 GJF 规范(两次 stop 行号稳定)
- *   FIXED_JAVA 修复后 PMD/GJF 双干净
- *   CLEAN_JAVA PMD/GJF 双干净
- *   LONG_JAVA  >100 列长行 + 恰好 1 条 EmptyCatchBlock
+ * fixture 内容对 google-java-format 1.36.1(aosp)实测校准:BAD_JAVA/CLEAN_JAVA 已符合
+ * GJF 规范(两次 stop 行号稳定),LONG_JAVA 含 >100 列长行(触发格式化改写)。
  */
 
 const fs = require('fs');
@@ -31,12 +36,13 @@ const { spawnSync } = require('child_process');
 
 const LAB = path.resolve(__dirname, '..');
 const RUNNER = path.join(__dirname, 'hook-runner.js');
+const REVIEW_MARK = path.join(__dirname, 'review-mark.js');
 const GIT_DIR = path.join(LAB, '.git');
 const TMP = path.join(LAB, '.selftest-tmp');
 const STATE_DIR = path.join(LAB, '.tools', 'hook-state');
 const QUEUE_FILE = path.join(STATE_DIR, 'touched-files.txt');
-const LEDGER_FILE = path.join(STATE_DIR, 'findings.json');
-const HISTORY_FILE = path.join(STATE_DIR, 'findings-history.log');
+const PREVIEW_FILE = path.join(STATE_DIR, 'ocr-preview.txt');
+const REVIEW_MARK_FILE = path.join(STATE_DIR, 'ocr-review.json');
 const BACKUP_DIR = path.join(TMP, '.hook-state-backup');
 
 // ---------------------------------------------------------------- 基础设施
@@ -77,6 +83,67 @@ function hook(mode, payload, timeoutMs) {
   return res;
 }
 
+// hook() 的 PATH 控制变体:dir 为字符串 → 前插(ocr 桩,模拟已安装);dir 为 null → 置空(模拟未安装)。
+// Windows 环境块键大小写不敏感,须先按大小写归一剔除原 PATH 再设,避免 PATH/Path 重复键
+function hookPath(mode, payload, dir, timeoutMs) {
+  const env = {};
+  const pathKey = Object.keys(process.env).find(k => k.toLowerCase() === 'path') || 'PATH';
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.toLowerCase() !== 'path') env[k] = v;
+  }
+  env[pathKey] = dir ? `${dir}${path.delimiter}${process.env[pathKey]}` : '';
+  env[HOST_KEY] = LAB;
+  delete env[HOST_KEY === 'ZCODE_PROJECT_DIR' ? 'CLAUDE_PROJECT_DIR' : 'ZCODE_PROJECT_DIR'];
+  const res = spawnSync(process.execPath, [RUNNER, mode], {
+    input: JSON.stringify(payload === undefined ? {} : payload),
+    encoding: 'utf8',
+    cwd: LAB,
+    env,
+    timeout: timeoutMs || 240000,
+  });
+  if (res.error) throw new Error(`runner 启动失败: ${res.error.message}`);
+  if (res.signal) throw new Error(`runner 超时被杀(${res.signal})`);
+  return res;
+}
+
+// 调 review-mark.js 子命令(done/status),环境与 hook() 同源
+function reviewMark(sub) {
+  const env = Object.assign({}, process.env, { [HOST_KEY]: LAB });
+  delete env[HOST_KEY === 'ZCODE_PROJECT_DIR' ? 'CLAUDE_PROJECT_DIR' : 'ZCODE_PROJECT_DIR'];
+  const res = spawnSync(process.execPath, [REVIEW_MARK, sub], { encoding: 'utf8', cwd: LAB, env, timeout: 60000 });
+  if (res.error) throw new Error(`review-mark 启动失败: ${res.error.message}`);
+  return res;
+}
+
+// ocr 桩:临时目录放可执行 ocr(Windows 用 .cmd,Unix 用 shell 脚本),前插 PATH 即"已安装"。
+// 内容固定为单行标记,断言只认这个标记——不依赖真机 ocr 的输出
+const OCR_STUB_LINE = 'stub-preview:src/main/java/Demo.java';
+function makeOcrStub() {
+  const dir = path.join(TMP, 'bin');
+  fs.mkdirSync(dir, { recursive: true });
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(dir, 'ocr.cmd'), `@echo off\r\necho ${OCR_STUB_LINE}\r\n`);
+  } else {
+    fs.writeFileSync(path.join(dir, 'ocr'), `#!/bin/sh\necho '${OCR_STUB_LINE}'\n`);
+    fs.chmodSync(path.join(dir, 'ocr'), 0o755);
+  }
+  return dir;
+}
+
+// 指纹的 diff 源是 git diff HEAD,仓库无任何提交时该命令必败 → init 后补一个空初始提交
+function gitInitOrFail() {
+  const init = spawnSync('git', ['init'], { cwd: LAB, encoding: 'utf8', timeout: 60000 });
+  if (init.status !== 0) throw new Error(`git init 失败: ${init.stderr || ''}`);
+  gitRun(['-c', 'user.email=selftest@local', '-c', 'user.name=selftest', 'commit', '--allow-empty', '-m', 'selftest-init']);
+}
+
+// 测试内直接跑 git(不经宿主与门禁,仅用于铺底:初始提交、把夹具纳入版本管理等)
+function gitRun(args) {
+  const r = spawnSync('git', args, { cwd: LAB, encoding: 'utf8', timeout: 60000 });
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')} 失败: ${(r.stderr || '').trim()}`);
+  return r;
+}
+
 function stdoutJson(res) {
   try {
     return JSON.parse(res.stdout);
@@ -115,7 +182,34 @@ function writeFixture(rel, content) {
 }
 
 function wipeState() {
-  fs.rmSync(STATE_DIR, { recursive: true, force: true });
+  rmTree(STATE_DIR);
+}
+
+// node v25.0.0 实测 fs.rm 系在 Windows 非 ASCII 路径(本仓中文路径)上静默失效,
+// 删除一律走 unlink/rmdir 原生绑定 + 手工递归,语义对齐 rmSync(recursive, force)
+function rmTree(p) {
+  let st;
+  try {
+    st = fs.lstatSync(p);
+  } catch {
+    return;
+  }
+  if (st.isDirectory()) {
+    for (const name of fs.readdirSync(p)) rmTree(path.join(p, name));
+    fs.rmdirSync(p);
+  } else {
+    try {
+      fs.unlinkSync(p);
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+  }
+}
+
+function queueLines() {
+  return fs.existsSync(QUEUE_FILE)
+    ? fs.readFileSync(QUEUE_FILE, 'utf8').split(/\r?\n/).filter(Boolean)
+    : [];
 }
 
 function postOn(file) {
@@ -136,24 +230,6 @@ const BAD_JAVA = [
   '        try {',
   '            helper();',
   '        } catch (Exception e) {',
-  '        }',
-  '    }',
-  '',
-  '    int helper() {',
-  '        return 5;',
-  '    }',
-  '}',
-].join('\n');
-
-const FIXED_JAVA = [
-  'package selftesttmp;',
-  '',
-  'public class Bad {',
-  '    void run() {',
-  '        try {',
-  '            helper();',
-  '        } catch (Exception e) {',
-  '            helper();',
   '        }',
   '    }',
   '',
@@ -191,60 +267,6 @@ const LONG_JAVA = [
   '        } catch (Exception e) {',
   '        }',
   '        return message.length();',
-  '    }',
-  '',
-  '    int helper() {',
-  '        return 5;',
-  '    }',
-  '}',
-].join('\n');
-
-const UNUSED_IMPORT_JAVA = [
-  'package selftesttmp;',
-  '',
-  'import java.util.regex.Pattern;',
-  '',
-  'public class UnusedImport {',
-  '    public String build(String raw) {',
-  '        return raw.trim();',
-  '    }',
-  '}',
-].join('\n');
-
-const UNUSED_FIELD_JAVA = [
-  'package selftesttmp;',
-  '',
-  'public class UnusedField {',
-  '    private int stash = 3;',
-  '',
-  '    public String build(String raw) {',
-  '        return raw.trim();',
-  '    }',
-  '}',
-].join('\n');
-
-const UNUSED_LOCAL_JAVA = [
-  'package selftesttmp;',
-  '',
-  'public class UnusedLocal {',
-  '    public String build(String raw) {',
-  '        int leftover = 9;',
-  '        return raw.trim();',
-  '    }',
-  '}',
-].join('\n');
-
-const MIXED_JAVA = [
-  'package selftesttmp;',
-  '',
-  'import java.util.regex.Pattern;',
-  '',
-  'public class Mixed {',
-  '    void run() {',
-  '        try {',
-  '            helper();',
-  '        } catch (Exception e) {',
-  '        }',
   '    }',
   '',
   '    int helper() {',
@@ -299,7 +321,7 @@ function preCases() {
   });
 
   runCase('P5', () => {
-    const ghp = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'; // 36 位
+    const ghp = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O7p6Q7r8'; // 36 位
     const content = `package selftesttmp;\n\npublic class P5 {\n    String auth = "${ghp}";\n}\n`;
     const res = hook('pre-tool-use', { tool_name: 'Write', tool_input: { file_path: j('P5.java'), content } });
     const out = denyJson(res);
@@ -357,7 +379,7 @@ function preCases() {
   });
 }
 
-// ---------------------------------------------------------------- bash-gate(B1-B11)
+// ---------------------------------------------------------------- bash-gate(B1-B17)
 
 function bashCases() {
   const denyBy = (id, command, need) => {
@@ -377,12 +399,15 @@ function bashCases() {
   denyBy('B12', "Set-Content -Path src/A.java -Value 'public class A {}'", 'PowerShell');
   denyBy('B13', "echo 'public class X{}' | Out-File src/X.java", 'PowerShell');
   denyBy('B14', "[IO.File]::WriteAllText('A.java', 'x')", 'WriteAll');
+  denyBy('B16', "[IO.File]::AppendAllText('A.java', 'x')", 'AppendAll');
+  denyBy('B17', 'Out-File -Encoding utf8 src/A.java', 'PowerShell');
 
   runCase('B15', () => {
-    const res = hook('bash-gate', { tool_name: 'PowerShell', tool_input: { command: 'Get-Content src/A.java | Out-File out.txt' } });
-    const out = denyJson(res);
-    const ok = !out && res.status === 0;
-    record('B15', ok, ok ? '读 .java 写 .txt 的 PowerShell 管道不误伤(放行)' : `误伤:status=${res.status} stdout=${(res.stdout || '').slice(0, 150)}`);
+    const c1 = hook('bash-gate', { tool_name: 'PowerShell', tool_input: { command: 'Get-Content src/A.java | Out-File out.txt' } });
+    // 参数带值形态下的同语义命令:写的是 .txt,.java 只被读
+    const c2 = hook('bash-gate', { tool_name: 'PowerShell', tool_input: { command: 'Get-Content src/A.java | Out-File -Encoding utf8 out.txt' } });
+    const ok = !denyJson(c1) && c1.status === 0 && !denyJson(c2) && c2.status === 0;
+    record('B15', ok, ok ? '读 .java 写 .txt 的 PowerShell 管道不误伤(裸/带参数两形态均放行)' : `误伤:status=${c1.status}/${c2.status} stdout=${(c1.stdout || c2.stdout || '').slice(0, 150)}`);
   });
 
   runCase('B5', () => {
@@ -410,117 +435,204 @@ function bashCases() {
     record('B8', ok, ok ? 'rm/javac 不误伤(均放行)' : `rm status=${r1.status}, javac status=${r2.status}`);
   });
 
+  // ---- git 评审标记门禁(ocr 用桩保证"已安装"确定性)
   runCase('B9', () => {
-    const init = spawnSync('git', ['init'], { cwd: LAB, encoding: 'utf8', timeout: 60000 });
-    if (init.status !== 0) throw new Error(`git init 失败: ${init.stderr || ''}`);
-    const p = writeFixture(path.join('gitcase', 'Bad.java'), BAD_JAVA);
-    const res = hook('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } });
+    gitInitOrFail();
+    const stubDir = makeOcrStub();
+    wipeState();
+    writeFixture(path.join('gitcase', 'Bad.java'), BAD_JAVA);
+    const res = hookPath('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } }, stubDir);
     const out = denyJson(res);
-    const ok = !!out && out.decision === 'deny' && /EmptyCatchBlock/.test(out.reason || '');
-    record('B9', ok, ok ? 'git 提交门禁 deny(PMD 检出 EmptyCatchBlock)' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 200)}`);
+    const ok = !!out && out.decision === 'deny' && (out.reason || '').includes('未经回合评审');
+    record('B9', ok, ok ? 'git 门 deny(有 .java 改动、ocr 在位、无评审标记)' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 200)}`);
   });
 
   runCase('B10', () => {
-    writeFixture(path.join('gitcase', 'Bad.java'), FIXED_JAVA); // 修复空 catch
-    const res = hook('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } });
-    const ok = res.status === 0 && !(res.stdout || '').trim();
-    record('B10', ok, ok ? '修复后同命令放行' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 200)}`);
+    const stubDir = makeOcrStub();
+    const mark = reviewMark('done');
+    if (mark.status !== 0) throw new Error(`review-mark done 失败: ${mark.stderr || mark.stdout}`);
+    writeFixture(path.join('gitcase', 'extra.txt'), 'x'); // 标记后再动工作区 → 指纹漂移
+    const res = hookPath('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } }, stubDir);
+    const out = denyJson(res);
+    const ok = !!out && out.decision === 'deny' && (out.reason || '').includes('指纹不匹配');
+    record('B10', ok, ok ? 'git 门 deny(标记后工作区变化,指纹不匹配)' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 200)}`);
   });
 
   runCase('B11', () => {
-    fs.rmSync(path.join(TMP, 'gitcase'), { recursive: true, force: true });
-    const files = [];
-    for (let i = 1; i <= 21; i++) {
-      files.push(writeFixture(path.join('gitbulk', `f${String(i).padStart(2, '0')}.java`), BAD_JAVA));
-    }
-    const res = hook('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } });
-    const stderr = res.stderr || '';
-    const ok = res.status === 0 && !(res.stdout || '').trim() && /partial/.test(stderr);
-    record('B11', ok, ok ? `21 个改动 .java 超上限,open 模式放行(stderr 含 partial 提示)` : `status=${res.status} stdout=${(res.stdout || '').slice(0, 150)} stderr=${stderr.slice(0, 150)}`);
+    const stubDir = makeOcrStub();
+    const mark = reviewMark('done'); // extra.txt 已在指纹内,重新标记 → 匹配
+    if (mark.status !== 0) throw new Error(`review-mark done 失败: ${mark.stderr || mark.stdout}`);
+    const r1 = hookPath('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } }, stubDir);
+    const okMatch = r1.status === 0 && !(r1.stdout || '').trim();
+    // 无 .java 改动时直接放行(不探测 ocr、不看标记)
+    rmTree(path.join(TMP, 'gitcase'));
+    const r2 = hook('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } });
+    const okNoJava = r2.status === 0 && !(r2.stdout || '').trim();
+    record('B11', okMatch && okNoJava, okMatch && okNoJava ? '标记匹配且有 .java 改动放行;无 .java 改动直接放行' : `匹配态 status=${r1.status} stdout=${(r1.stdout || '').slice(0, 150)};无java status=${r2.status}`);
+  });
+
+  // 内容盲区钉子①:标记后仅改"未跟踪脏 .java"的内容——status 行集不变,归一化内容哈希须使指纹漂移
+  runCase('B18', () => {
+    const stubDir = makeOcrStub();
+    wipeState();
+    const p = writeFixture(path.join('gitcase', 'Untracked.java'), CLEAN_JAVA);
+    const mark = reviewMark('done');
+    if (mark.status !== 0) throw new Error(`review-mark done 失败: ${mark.stderr || mark.stdout}`);
+    fs.appendFileSync(p, '// after mark\n'); // 只改内容,路径级 status 不变
+    const res = hookPath('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } }, stubDir);
+    const out = denyJson(res);
+    const ok = !!out && out.decision === 'deny' && (out.reason || '').includes('指纹不匹配');
+    record('B18', ok, ok ? 'git 门 deny(未跟踪 .java 标记后仅改语义内容)' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 200)}`);
+  });
+
+  // 内容盲区钉子②:标记后对"已跟踪已修改" .java 再改内容——status 行( M)不变,-w diff 须使指纹漂移
+  runCase('B19', () => {
+    const stubDir = makeOcrStub();
+    wipeState();
+    const p = writeFixture(path.join('gitcase', 'Tracked.java'), CLEAN_JAVA);
+    const rel = path.relative(LAB, p).replace(/\\/g, '/');
+    gitRun(['add', rel]);
+    gitRun(['-c', 'user.email=selftest@local', '-c', 'user.name=selftest', 'commit', '-m', 'track Tracked.java']);
+    fs.appendFileSync(p, '// dirty\n'); // 已跟踪已修改( M)
+    const mark = reviewMark('done');
+    if (mark.status !== 0) throw new Error(`review-mark done 失败: ${mark.stderr || mark.stdout}`);
+    fs.appendFileSync(p, '// after mark\n'); // status 行不变,只有 diff 内容变
+    const res = hookPath('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } }, stubDir);
+    const out = denyJson(res);
+    const ok = !!out && out.decision === 'deny' && (out.reason || '').includes('指纹不匹配');
+    record('B19', ok, ok ? 'git 门 deny(已跟踪已修改 .java 标记后再改语义内容)' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 200)}`);
+  });
+
+  // 大小写旁路:Windows 可执行名大小写不敏感,Git commit 不能绕过 git 门
+  runCase('B20', () => {
+    const stubDir = makeOcrStub();
+    wipeState();
+    writeFixture(path.join('gitcase', 'Bad.java'), BAD_JAVA);
+    const res = hookPath('bash-gate', { tool_name: 'Bash', tool_input: { command: 'Git commit --dry-run -m x' } }, stubDir);
+    const out = denyJson(res);
+    const ok = !!out && out.decision === 'deny' && (out.reason || '').includes('未经回合评审');
+    record('B20', ok, ok ? 'Git(大写)commit 同样 deny,进入 git 门' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 200)}`);
+  });
+
+  // 语义指纹钉子:标记后对脏 .java 做纯空白改动(加缩进/空行)→ git 门仍放行。
+  // 未跟踪态靠空白归一化哈希;已跟踪已修改态(B19 留下的 Tracked.java)靠 -w patch 过滤。
+  // (Stop 层 GJF 回合末自动格式化重写文件不得作废指纹)
+  runCase('B21', () => {
+    const stubDir = makeOcrStub();
+    wipeState();
+    const p = writeFixture(path.join('gitcase', 'Ws.java'), CLEAN_JAVA);
+    const mark = reviewMark('done');
+    if (mark.status !== 0) throw new Error(`review-mark done 失败: ${mark.stderr || mark.stdout}`);
+    fs.appendFileSync(p, '   \n\n'); // 未跟踪 .java:纯空白(缩进+空行),语义不变
+    const r1 = hookPath('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } }, stubDir);
+    const okUntracked = r1.status === 0 && !(r1.stdout || '').trim();
+    fs.appendFileSync(path.join(TMP, 'gitcase', 'Tracked.java'), '  \n'); // 已跟踪已修改 .java:纯空白追加
+    const r2 = hookPath('bash-gate', { tool_name: 'Bash', tool_input: { command: 'git commit -m x' } }, stubDir);
+    const okTracked = r2.status === 0 && !(r2.stdout || '').trim();
+    record('B21', okUntracked && okTracked, okUntracked && okTracked
+      ? 'git 门放行(未跟踪与已跟踪已修改两态的纯空白改动均不使语义指纹漂移)'
+      : `未跟踪态 status=${r1.status} stdout=${(r1.stdout || '').slice(0, 150)};跟踪态 status=${r2.status} stdout=${(r2.stdout || '').slice(0, 150)}`);
   });
 
   // git 用例结束,立即清掉临时 .git(finally 里还有兜底)
-  if (fs.existsSync(GIT_DIR)) fs.rmSync(GIT_DIR, { recursive: true, force: true });
+  if (fs.existsSync(GIT_DIR)) rmTree(GIT_DIR);
 }
 
-// ---------------------------------------------------------------- post-tool-use(U1-U7)
+// ---------------------------------------------------------------- review-mark(R1-R3)
+
+function reviewMarkCases() {
+  try {
+    gitInitOrFail();
+  } catch (e) {
+    record('R1', false, `git init 失败,R 段跳过: ${e.message}`);
+    return;
+  }
+  try {
+    runCase('R1', () => {
+      wipeState();
+      const res = reviewMark('status');
+      const out = stdoutJson(res);
+      const ok = res.status === 0 && out && out.missing === true;
+      record('R1', ok, ok ? 'status 无标记时输出 {"missing":true}' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 150)}`);
+    });
+
+    runCase('R2', () => {
+      wipeState();
+      const done = reviewMark('done');
+      const payload = stdoutJson(done);
+      const shapeOk = done.status === 0 && payload && payload.version === 1
+        && /^[0-9a-f]{32}$/.test(payload.fingerprint || '') && !isNaN(Date.parse(payload.markedAt || ''));
+      const fileOk = fs.existsSync(REVIEW_MARK_FILE);
+      const st = reviewMark('status');
+      const roundTrip = JSON.stringify(stdoutJson(st)) === JSON.stringify(payload);
+      const ok = shapeOk && fileOk && roundTrip;
+      record('R2', ok, ok ? 'done 写入 {version:1,fingerprint:32hex,markedAt:ISO},status 原样往返' : `shape=${shapeOk} file=${fileOk} 往返=${roundTrip} stdout=${(done.stdout || '').slice(0, 150)}`);
+    });
+
+    runCase('R3', () => {
+      wipeState();
+      const fp1 = stdoutJson(reviewMark('done')).fingerprint;
+      writeFixture(path.join('r3', 'extra.txt'), 'x');
+      const fp2 = stdoutJson(reviewMark('done')).fingerprint;
+      rmTree(path.join(TMP, 'r3'));
+      const fp3 = stdoutJson(reviewMark('done')).fingerprint;
+      const ok = fp1 && fp2 && fp3 && fp1 !== fp2 && fp1 === fp3;
+      record('R3', ok, ok ? '指纹对工作区变化敏感(加文件变、删掉复原)' : `fp1=${fp1} fp2=${fp2} fp3=${fp3}`);
+    });
+  } finally {
+    if (fs.existsSync(GIT_DIR)) rmTree(GIT_DIR);
+  }
+}
+
+// ---------------------------------------------------------------- post-tool-use(U1-U4)
 
 function postCases() {
   runCase('U1', () => {
     wipeState();
     const p = writeFixture(path.join('u1', 'Bad.java'), BAD_JAVA);
     const res = postOn(p);
-    const prob = protocolProblem(res);
-    const ctx = ctxOf(res);
-    const ok = !prob && res.status === 0 && ctx.includes('[PMD]') && ctx.includes('EmptyCatchBlock');
-    record('U1', ok, ok ? '输出 PostToolUse JSON,含 [PMD] 与 EmptyCatchBlock' : `status=${res.status} ${prob || ''} stdout=${(res.stdout || '').slice(0, 200)}`);
+    const lines = queueLines();
+    const ok = res.status === 0 && !(res.stdout || '').trim() && !(res.stderr || '').trim()
+      && lines.length === 1 && lines[0] === p.replace(/\\/g, '/');
+    record('U1', ok, ok ? 'Bad.java 仅入队(不再跑任何检查),stdout 静默' : `status=${res.status} 队列=${JSON.stringify(lines)} stdout=${(res.stdout || '').slice(0, 150)}`);
   });
 
   runCase('U2', () => {
     wipeState();
-    const p = writeFixture(path.join('u2', 'UnusedImport.java'), UNUSED_IMPORT_JAVA);
+    const p = writeFixture(path.join('u2', 'notes.md'), '# notes\n');
     const res = postOn(p);
-    const prob = protocolProblem(res);
-    const ctx = ctxOf(res);
-    const ok = !prob && res.status === 0 && !ctx.includes('UnnecessaryImport');
-    record('U2', ok, ok ? (ctx ? '有输出但未出现 UnnecessaryImport(已抑制)' : '完全静默(UnnecessaryImport 已抑制)') : `status=${res.status} ${prob || ''} stdout=${(res.stdout || '').slice(0, 200)}`);
+    const ok = res.status === 0 && !(res.stdout || '').trim() && queueLines().length === 0;
+    record('U2', ok, ok ? '.md 不入队、静默' : `status=${res.status} 队列=${JSON.stringify(queueLines())}`);
   });
 
   runCase('U3', () => {
     wipeState();
-    const p = writeFixture(path.join('u3', 'UnusedField.java'), UNUSED_FIELD_JAVA);
-    const res = postOn(p);
-    const prob = protocolProblem(res);
-    const ctx = ctxOf(res);
-    const ok = !prob && res.status === 0 && !ctx.includes('UnusedPrivateField');
-    record('U3', ok, ok ? (ctx ? '有输出但未出现 UnusedPrivateField(已抑制)' : '完全静默(UnusedPrivateField 已抑制)') : `status=${res.status} ${prob || ''} stdout=${(res.stdout || '').slice(0, 200)}`);
+    const res = postOn(path.join(TMP, 'u3', 'target', 'Gen.java'));
+    const ok = res.status === 0 && !(res.stdout || '').trim() && queueLines().length === 0;
+    record('U3', ok, ok ? 'target/ 等忽略路径不入队' : `status=${res.status} 队列=${JSON.stringify(queueLines())}`);
   });
 
   runCase('U4', () => {
     wipeState();
-    const p = writeFixture(path.join('u4', 'UnusedLocal.java'), UNUSED_LOCAL_JAVA);
-    const res = postOn(p);
-    const prob = protocolProblem(res);
-    const ctx = ctxOf(res);
-    const ok = !prob && res.status === 0 && !ctx.includes('UnusedLocalVariable');
-    record('U4', ok, ok ? (ctx ? '有输出但未出现 UnusedLocalVariable(已抑制)' : '完全静默(UnusedLocalVariable 已抑制)') : `status=${res.status} ${prob || ''} stdout=${(res.stdout || '').slice(0, 200)}`);
-  });
-
-  runCase('U5', () => {
-    wipeState();
-    const p = writeFixture(path.join('u5', 'Mixed.java'), MIXED_JAVA);
-    const res = postOn(p);
-    const prob = protocolProblem(res);
-    const ctx = ctxOf(res);
-    const ok = !prob && res.status === 0 && ctx.includes('EmptyCatchBlock') && !ctx.includes('UnnecessaryImport');
-    record('U5', ok, ok ? 'EmptyCatchBlock 仍报出,UnnecessaryImport 被抑制(未误伤)' : `status=${res.status} ${prob || ''} stdout=${(res.stdout || '').slice(0, 200)}`);
-  });
-
-  runCase('U6', () => {
-    wipeState();
-    const p = writeFixture(path.join('u6', 'notes.md'), '# notes\n');
-    const res = postOn(p);
-    const ok = res.status === 0 && !(res.stdout || '').trim() && !(res.stderr || '').trim();
-    record('U6', ok, ok ? '.md 文件静默' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 150)}`);
-  });
-
-  runCase('U7', () => {
-    wipeState();
-    const p = writeFixture(path.join('u7', 'Clean.java'), CLEAN_JAVA);
-    const res = postOn(p);
-    const ok = res.status === 0 && !(res.stdout || '').trim() && !(res.stderr || '').trim();
-    record('U7', ok, ok ? '干净文件静默 exit0' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 150)}`);
+    const p = writeFixture(path.join('u4', 'Bad.java'), BAD_JAVA);
+    postOn(p);
+    postOn(p);
+    const lines = queueLines();
+    const ok = lines.length === 2 && lines.every(l => l === p.replace(/\\/g, '/'));
+    record('U4', ok, ok ? '重复 post 追加两行(append 语义,去重由 Stop 聚合承担)' : `队列=${JSON.stringify(lines)}`);
   });
 }
 
 // ---------------------------------------------------------------- stop(S1-S7)
 
 function stopCases() {
+  // S1/S2/S5/S6 统一用 ocr 桩 PATH:真机装没装 ocr 都不影响断言与耗时
   runCase('S1', () => {
     wipeState();
+    const stubDir = makeOcrStub();
     const p = writeFixture(path.join('s1', 'LongFile.java'), LONG_JAVA);
-    postOn(p); // 入队(顺带单文件检查)
-    const res = hook('stop', {});
+    postOn(p); // 入队
+    const res = hookPath('stop', {}, stubDir);
     const ctx = ctxOf(res);
     const maxLen = maxLineLen(p);
     const ok = res.status === 0 && maxLen <= 100 && ctx.includes('已自动格式化');
@@ -529,52 +641,42 @@ function stopCases() {
 
   runCase('S2', () => {
     wipeState();
+    const stubDir = makeOcrStub();
     const p = writeFixture(path.join('s2', 'Clean.java'), CLEAN_JAVA);
     postOn(p);
-    const res = hook('stop', {});
+    const res = hookPath('stop', {}, stubDir);
     const ctx = ctxOf(res);
     const ok = res.status === 0 && !ctx.includes('已自动格式化');
-    record('S2', ok, ok ? (ctx ? '有输出但无"已自动格式化"字样' : '已规范文件 stop 静默,无"已自动格式化"') : `status=${res.status} stdout=${(res.stdout || '').slice(0, 200)}`);
+    record('S2', ok, ok ? (ctx ? '有输出(评审提醒)但无"已自动格式化"字样' : '静默') : `status=${res.status} stdout=${(res.stdout || '').slice(0, 200)}`);
   });
 
   runCase('S3', () => {
     wipeState();
+    const stubDir = makeOcrStub();
     const p = writeFixture(path.join('s3', 'Bad.java'), BAD_JAVA);
     postOn(p);
-    const r1 = hook('stop', {});
-    const c1 = ctxOf(r1);
-    postOn(p); // 同一违规再次入队
-    const r2 = hook('stop', {});
-    const c2 = ctxOf(r2);
-    const ok = r1.status === 0 && r2.status === 0
-      && c1.includes('EmptyCatchBlock') && !c1.includes('此前已报告')
-      && c2.includes('另有 1 条此前已报告');
-    record('S3', ok, ok ? '第二次 stop 只提示"另有 1 条此前已报告"(台账去重生效)' : `stop1=${(r1.stdout || '').slice(0, 120)} stop2=${(r2.stdout || '').slice(0, 160)}`);
+    const res = hookPath('stop', {}, stubDir);
+    const ctx = ctxOf(res);
+    const previewSaved = fs.existsSync(PREVIEW_FILE) && fs.readFileSync(PREVIEW_FILE, 'utf8').includes(OCR_STUB_LINE);
+    const ok = res.status === 0 && ctx.includes('ocr delegate preview') && ctx.includes(OCR_STUB_LINE)
+      && ctx.includes('review-mark.js done') && previewSaved;
+    record('S3', ok, ok ? 'preview 清单注入 additionalContext 且原始输出落 ocr-preview.txt,附 review-mark 提示' : `status=${res.status} 落盘=${previewSaved} ctx=${ctx.slice(0, 200)}`);
   });
 
   runCase('S4', () => {
     wipeState();
     const p = writeFixture(path.join('s4', 'Bad.java'), BAD_JAVA);
     postOn(p);
-    hook('stop', {}); // 违规进台账
-    fs.writeFileSync(p, FIXED_JAVA); // 修复空 catch
-    postOn(p);
-    const res = hook('stop', {});
-    const hist = fs.existsSync(HISTORY_FILE) ? fs.readFileSync(HISTORY_FILE, 'utf8') : '';
-    let stillThere = true;
-    try {
-      const ledger = JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8'));
-      stillThere = Object.values(ledger.findings || {}).some(f => f.rule === 'EmptyCatchBlock');
-    } catch (e) {
-      throw new Error(`findings.json 解析失败: ${e.message}`);
-    }
-    const fixedLine = (hist.split(/\r?\n/).find(l => /^FIXED /.test(l) && l.includes('EmptyCatchBlock')) || '');
-    const ok = !!fixedLine && !stillThere;
-    record('S4', ok, ok ? `findings-history.log 出现 FIXED 行且台账中该条消失(${fixedLine.slice(0, 100)})` : `FIXED行=${fixedLine ? '有' : '无'} 台账仍含该条=${stillThere} status=${res.status}`);
+    // PATH 置空 = 确定性"未安装 ocr"
+    const res = hookPath('stop', {}, null);
+    const ctx = ctxOf(res);
+    const ok = res.status === 0 && ctx.includes('未检测到 ocr') && ctx.includes('npm install -g @alibaba-group/open-code-review');
+    record('S4', ok, ok ? 'ocr 缺失时降级提示(安装命令)注入 additionalContext' : `status=${res.status} ctx=${ctx.slice(0, 200)}`);
   });
 
   runCase('S5', () => {
     wipeState();
+    const stubDir = makeOcrStub();
     const files = [];
     for (let i = 1; i <= 31; i++) {
       files.push(writeFixture(path.join('s5', `f${String(i).padStart(2, '0')}.java`), BAD_JAVA));
@@ -582,7 +684,7 @@ function stopCases() {
     // 直接入队(队列格式:每行一个正斜杠绝对路径)——本用例考察 stop 截断,不考察入队通道
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.writeFileSync(QUEUE_FILE, files.map(f => f.replace(/\\/g, '/')).join('\n') + '\n');
-    const res = hook('stop', {}, 480000);
+    const res = hookPath('stop', {}, stubDir, 480000);
     const ctx = ctxOf(res);
     const ok = res.status === 0 && ctx.includes('partial') && ctx.includes('stopMaxFiles');
     record('S5', ok, ok ? '31 个文件触发 stopMaxFiles=30 截断,输出含 partial 提示' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 300)}`);
@@ -590,10 +692,11 @@ function stopCases() {
 
   runCase('S6', () => {
     wipeState();
+    const stubDir = makeOcrStub();
     const p = writeFixture(path.join('s6', 'Bad.java'), BAD_JAVA);
     postOn(p);
     if (!fs.existsSync(QUEUE_FILE)) throw new Error('前置失败:post 后队列文件应存在');
-    hook('stop', {});
+    hookPath('stop', {}, stubDir);
     const gone = !fs.existsSync(QUEUE_FILE) || !fs.readFileSync(QUEUE_FILE, 'utf8').trim();
     record('S6', gone, gone ? 'stop 后 touched-files.txt 被清空' : 'stop 后队列文件仍有内容');
   });
@@ -611,9 +714,10 @@ function stopCases() {
 function protocolAndWarmupCases() {
   runCase('J1', () => {
     wipeState();
+    const stubDir = makeOcrStub();
     const p = writeFixture(path.join('j1', 'Bad.java'), BAD_JAVA);
     const r1 = postOn(p);
-    const r2 = hook('stop', {});
+    const r2 = hookPath('stop', {}, stubDir);
     const p1 = protocolProblem(r1);
     const p2 = protocolProblem(r2);
     const ok = !p1 && !p2 && r1.status === 0 && r2.status === 0;
@@ -641,23 +745,24 @@ function main() {
   }
 
   try {
-    fs.rmSync(TMP, { recursive: true, force: true });
+    rmTree(TMP);
     fs.mkdirSync(TMP, { recursive: true });
     preCases();
     bashCases();
+    reviewMarkCases();
     postCases();
     stopCases();
     protocolAndWarmupCases();
   } finally {
     // 恢复现场:hook-state 还原、临时 .git 删除、fixture 删除
     try {
-      fs.rmSync(STATE_DIR, { recursive: true, force: true });
+      rmTree(STATE_DIR);
       if (hadState) fs.cpSync(BACKUP_DIR, STATE_DIR, { recursive: true });
     } catch (e) {
       console.error(`[selftest] hook-state 恢复失败: ${e.message}`);
     }
-    if (!hadGit && fs.existsSync(GIT_DIR)) fs.rmSync(GIT_DIR, { recursive: true, force: true });
-    fs.rmSync(TMP, { recursive: true, force: true });
+    if (!hadGit && fs.existsSync(GIT_DIR)) rmTree(GIT_DIR);
+    rmTree(TMP);
   }
 
   const fails = results.filter(r => !r.ok);
