@@ -56,7 +56,7 @@ function main() {
   console.log('[install] 预置工具(已就绪则秒过)...');
   const warmed = spawnSync(process.execPath, [RUNNER, 'warmup'], { stdio: 'inherit' });
   if (warmed.status !== 0) {
-    throw new Error(`工具预置失败(exit ${warmed.status});失败详情含手动下载地址与存放路径。工具版本在同目录 hook-config.json(formatter.version / convention.version / deepScan.*),改版本后重跑本命令即自动下载新版本`);
+    throw new Error(`工具预置失败(exit ${warmed.status});失败详情含手动下载地址与存放路径。工具版本在同目录 hook-config.json(formatter.version / deepScan.* / ocr.baseline),改版本后重跑本命令即自动下载新版本`);
   }
   if (!target) {
     console.log('[install] 预置完成:resources/ 已自包含(含 .tools/),拷贝其内容到新项目根即用。');
@@ -97,15 +97,22 @@ function syncRules() {
 // ocr(open-code-review)是评审链路的可选外部 CLI:检测到缺失只打印安装指引,
 // 不代装、不影响退出码——未装时 hook 自身有降级语义(编辑期评审跳过、git 门按 failureMode 处理)
 function checkOcr() {
+  // 版本门槛的唯一来源是同目录 hook-config.json 的 ocr.min(默认 v1.9.0 = --format json 下限);
+  // 配置缺失时只跳过版本比较,不在此处留影子默认值
+  let min = null;
+  try {
+    min = require('./hook-config.json').ocr.min || null;
+  } catch { /* 配置缺失时仅做存在性检测 */ }
+  const minV = min ? (min.match(/(\d+)\.(\d+)\.(\d+)/) || []).slice(1).map(Number) : null;
   // shell:true 仅为 Windows 解析 npm 全局装的 ocr.cmd(spawn 默认不查 PATHEXT);参数是静态的,无注入面
   const probe = spawnSync('ocr', ['--version'], { shell: true, encoding: 'utf8' });
   if (probe.status === 0 && probe.stdout && probe.stdout.trim()) {
     const firstLine = probe.stdout.trim().split(/\r?\n/)[0];
     console.log(`[install] 检测到 ocr: ${firstLine}`);
     const v = (firstLine.match(/(\d+)\.(\d+)\.(\d+)/) || []).slice(1).map(Number);
-    // v1.9.0 是 --format json 的下限,低于它 stdout 契约不完整;只警告不拦截,不做强锁
-    if (v.length === 3 && (v[0] < 1 || (v[0] === 1 && v[1] < 9))) {
-      console.warn(`[install] 警告: ocr ${v.join('.')} 低于 v1.9.0(--format json 不可用,评审契约不完整),建议升级: npm install -g @alibaba-group/open-code-review@latest`);
+    if (minV && v.length === 3 && minV.length === 3
+      && (v[0] < minV[0] || (v[0] === minV[0] && (v[1] < minV[1] || (v[1] === minV[1] && v[2] < minV[2]))))) {
+      console.warn(`[install] 警告: ocr ${v.join('.')} 低于 hook-config.json 的 ocr.min=v${minV.join('.')}(--format json 不可用,评审契约不完整),建议升级: npm install -g @alibaba-group/open-code-review@latest`);
     }
     return;
   }
@@ -114,7 +121,7 @@ function checkOcr() {
   console.warn('[install] 未检测到 ocr(open-code-review)——编辑期 delegate 评审与交付前 AI 全量评审需要它。');
   console.warn('[install] 安装: npm install -g @alibaba-group/open-code-review');
   console.warn('[install] (Windows 备选: irm https://open-codereview.ai/install.ps1 | iex)');
-  console.warn('[install] 要求 >= v1.9.0(--format json);本安装器不代装。');
+  console.warn(min ? `[install] 要求 >= v${min}(见 hook-config.json ocr.min);本安装器不代装。` : '[install] 本安装器不代装。');
   console.warn('[install] ============================================================');
 }
 
