@@ -50,6 +50,7 @@ node resources/scripts/upgrade.js --check   # 只查不升:ocr / google-java-for
 - 目标项目侧同理:`node scripts/upgrade.js`(升的是该项目环境)。
 - `.tools/` 内工具(google-java-format 等)版本改 `resources/scripts/hook-config.json` 对应字段后,重跑 `node resources/scripts/install.js` 下载新版(旧版保留可回退);ocr 的实测回归锚点登记在同文件 `ocr.baseline`,升级全绿后更新它。
 - GitHub CI 每周自动查新并开 issue 提醒(「依赖版本更新提醒」;workflow 在 `.github/workflows/version-watch.yml`,模板侧资产,不随拷贝传导)。
+- **离线升级通道**:查新发现落后项时,同一 CI 运行会打包上传 Artifacts(`dep-bundle-<run号>`,留 90 天;issue 里附本运行的下载入口)。本地下载解压后 `node resources/scripts/upgrade.js --offline <解压目录>` 零网络应用——ocr 以主包+平台包(win32-x64)双 tgz 本地 `npm i -g`(postinstall 见平台包二进制即不触网)、google-java-format/SpotBugs 直接落位 `.tools/`,sha256 逐文件校验;回归与 baseline 更新仍按上面在线流程走,离线通道只免下载。打包失败(运行红、无 Artifacts)时回退在线通道。
 
 ## 维护约定
 

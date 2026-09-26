@@ -29,13 +29,25 @@ jobs:
         id: check
         continue-on-error: true # 发现新版 exit 1 是预期信号,由下一步转成 issue,不让 job 直接红
         run: node resources/scripts/upgrade.js --check | tee "$RUNNER_TEMP/version-report.txt"
+      - name: 打包离线升级包(仅有落后项)
+        id: pack
+        if: steps.check.outcome == 'failure'
+        run: node resources/scripts/upgrade.js --pack "$RUNNER_TEMP/dep-bundle"
+      - name: 上传离线升级包(留 90 天)
+        # pack 失败则不上传半个坏包(上传条件含 pack 成功);issue 文案对"无 Artifacts"情形有指引
+        if: steps.check.outcome == 'failure' && steps.pack.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dep-bundle-${{ github.run_number }}
+          path: ${{ runner.temp }}/dep-bundle
+          retention-days: 90
       - name: 开 issue 提醒(仅当发现新版)
         if: steps.check.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          body="$(date -u +'## %Y-%m-%d %H:%M UTC')"$'\n\n'"$(cat "$RUNNER_TEMP/version-report.txt")"
+          body="$(date -u +'## %Y-%m-%d %H:%M UTC')"$'\n\n'"$(cat "$RUNNER_TEMP/version-report.txt")"$'\n\n'"离线通道:本运行若已上传 Artifacts,到 https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID 页面底部下载 dep-bundle-$GITHUB_RUN_NUMBER(zip,含 manifest.json 与 sha256),解压后执行 node resources/scripts/upgrade.js --offline <解压目录> 零网络应用(ocr 本地 tgz 安装、jar 落位 .tools/);未上传(run 红,打包失败)则走在线通道:node resources/scripts/upgrade.js。"
           num=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search '依赖版本更新提醒 in:title' --json number --jq '.[0].number // empty')
           if [ -n "$num" ]; then
             gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body "$body"
