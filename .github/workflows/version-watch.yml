@@ -1,7 +1,7 @@
 # 模板侧资产:每周自动查依赖新版,发现即开/追评 issue 提醒。
 # push 到 main 只做冒烟(验证工作流健康),不打包不落 issue 防刷屏。
 # 本文件在仓库根 .github/ 下,不随 resources/ 的拷贝传导——传导内容以 resources/ 为准。
-name: 版本监控
+name: version-watch
 
 on:
   push:
