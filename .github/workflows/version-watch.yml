@@ -1,8 +1,11 @@
 # 模板侧资产:每周自动查依赖新版,发现即开/追评 issue 提醒。
+# push 到 main 只做冒烟(验证工作流健康),不打包不落 issue 防刷屏。
 # 本文件在仓库根 .github/ 下,不随 resources/ 的拷贝传导——传导内容以 resources/ 为准。
 name: 版本监控
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: '23 9 * * 1' # 每周一 09:23 UTC,刻意避开整点(整点 cron 拥挤,触发易延迟)
   workflow_dispatch: {}
@@ -31,18 +34,18 @@ jobs:
         run: node resources/scripts/upgrade.js --check | tee "$RUNNER_TEMP/version-report.txt"
       - name: 打包离线升级包(仅有落后项)
         id: pack
-        if: steps.check.outcome == 'failure'
+        if: github.event_name != 'push' && steps.check.outcome == 'failure'
         run: node resources/scripts/upgrade.js --pack "$RUNNER_TEMP/dep-bundle"
       - name: 上传离线升级包(留 90 天)
         # pack 失败则不上传半个坏包(上传条件含 pack 成功);issue 文案对"无 Artifacts"情形有指引
-        if: steps.check.outcome == 'failure' && steps.pack.outcome == 'success'
+        if: github.event_name != 'push' && steps.check.outcome == 'failure' && steps.pack.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: dep-bundle-${{ github.run_number }}
           path: ${{ runner.temp }}/dep-bundle
           retention-days: 90
       - name: 开 issue 提醒(仅当发现新版)
-        if: steps.check.outcome == 'failure'
+        if: github.event_name != 'push' && steps.check.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
