@@ -16,7 +16,23 @@
 | `scripts/` | hook-runner.js + 配置 + install / selftest / build-rules / upgrade 脚本 |
 | `.tools/` | 工具缓存(现仅 google-java-format,约 4MB;由 install.js 预置生成,随拷贝带走后新项目免下载) |
 
+## 环境准备(小白向,首次使用前装齐)
+
+模板自身与传导后的新项目,涉及安装的外部依赖全列在这里——已有的对应项直接跳过:
+
+| 依赖 | 干什么用 | 怎么装 |
+|---|---|---|
+| Node.js(LTS,自带 npm) | 跑 `install.js`、hook-runner、`upgrade.js` 等全部脚本 | [nodejs.org](https://nodejs.org) 装 LTS 版,终端 `node -v` 能出版本号即成功 |
+| JDK 11+(设 `JAVA_HOME`) | google-java-format 等工具的运行 JVM | 安装 JDK 后把 `JAVA_HOME` 指向其目录;新项目自身要求的 JDK 版本以项目为准 |
+| ocr(open-code-review) | 编辑期 AI 评审的核心 CLI,**全局 npm 包,不随模板拷贝,必须单独装** | `npm install -g @alibaba-group/open-code-review`(要求 ≥v1.9.0) |
+| Git | 模板仓库本身、新项目 hook 的 git 门禁 | [git-scm.com](https://git-scm.com) 下载安装 |
+| 任一 AI 宿主:ZCode / Claude Code / Codex | 承载 hook 与评审命令 | 正在用任一即可;Codex 首启需在 `/hooks` 逐条信任(一次性) |
+
+不需要手动装:google-java-format、SpotBugs 等重工具由 `install.js` 自动下载进 `.tools/`(约 4MB,随拷贝带走)。ocr 装完后可用 `node resources/scripts/upgrade.js --check` 核对本机版本是否达标。
+
 ## 使用流程
+
+以下步骤默认「环境准备」已装齐。
 
 **1. 一次性预置**(下载约 4MB 工具到 `resources/.tools/`,让 resources/ 完全自包含):
 
