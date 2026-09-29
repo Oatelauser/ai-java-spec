@@ -73,7 +73,7 @@ delegate 模式下 `ocr` 端**零 LLM 调用、零 API key**——它只出清�
 
 | 工具 | 字段(hook-config.json) | 在哪查可用版本 | 手动存放路径(免改名) |
 |---|---|---|---|
-| google-java-format | `formatter.version` | Maven Central | `.tools/google-java-format/` 下 `gjf-<版本>.jar` 或官方原名 jar |
+| google-java-format(未配 Spotless 时的兜底格式化) | `formatter.version` | Maven Central | `.tools/google-java-format/` 下 `gjf-<版本>.jar` 或官方原名 jar |
 | SpotBugs(默认关) | `deepScan.spotbugsVersion` | GitHub Releases | `.tools/spotbugs/spotbugs-<版本>.tgz` |
 | FindSecBugs 插件(默认关) | `deepScan.findsecbugsVersion` | Maven Central | `.tools/spotbugs/spotbugs-<版本>/plugin/findsecbugs-plugin-<版本>.jar` |
 
@@ -85,7 +85,7 @@ delegate 模式下 `ocr` 端**零 LLM 调用、零 API key**——它只出清�
 - **命令门**(PreToolUse, Bash)两件事:
   - 防旁路:检测 heredoc/重定向/`sed -i`/`tee` 及 PowerShell 的 `Out-File`/`Set-Content`/`Add-Content`/`.NET WriteAll*` 直接写改 `.java`,deny 并引导改用 Write/Edit 进入受控链路;
   - Git 门:`git commit/push` 前做**评审状态标记校验**(不再重跑静态分析)。标记由 `scripts/review-mark.js` 在评审完成时写入,内含评审时刻的 diff 指纹——改动未评审、或评审之后又有新 `.java` 改动(指纹不匹配)即阻断;ocr CLI 缺失时按 `failureMode` 降级(`open`=留痕放行/`strict`=拒绝)。
-- **Stop(回合末)**:格式化自动修复(google-java-format)+ 可选深度扫描 + **评审提醒**——同步跑 `ocr delegate preview`,把文件清单与规则预注入上下文(best-effort,送达依赖宿主),并落 hook-state 供 git 门比对;清单超过 `performance.stopMaxFiles`(默认 30)时截断,超额部分标注 partial/INCONCLUSIVE,提示分批评审。
+- **Stop(回合末)**:格式化自动修复(双模式:根 pom 配 Spotless 即委托 `mvn spotless:apply`,否则自带 google-java-format,见第 6 节"格式化双模式")+ 可选深度扫描 + **评审提醒**——同步跑 `ocr delegate preview`,把文件清单与规则预注入上下文(best-effort,送达依赖宿主),并落 hook-state 供 git 门比对;清单超过 `performance.stopMaxFiles`(默认 30)时截断,超额部分标注 partial/INCONCLUSIVE,提示分批评审。
 - PostToolUse(Edit|Write)对 `.java` 只做队列标记、不做检查(省去每次编辑的外部进程开销),检查收敛到回合级 delegate 评审。
 
 **信任模型(如实)**:git 门是"标记校验"而非"客观复检"——防遗忘、防偷懒,不防伪造(AI 理论上可手写标记或改 hook 脚本自毁门禁;这与引入前"AI 可绕过静态分析工具"是同级风险)。真正的确定性兜底是交付前的 pom 三类检查与 AI 全量评审流程。
@@ -132,11 +132,13 @@ delegate 模式下 `ocr` 端**零 LLM 调用、零 API key**——它只出清�
 
 **实测状态(如实)**:ZCode 侧已实证——引擎触发、写入前 deny、PostToolUse 回灌、Stop 的动作链(格式化改写、台账写入、队列清空);**但 Stop 的 additionalContext 提示在一次实测中未注入模型上下文**(文件确被格式化改写,模型却未收到"已自动格式化"提示;单次观测,复测待做)。在结论明确前,不要把"没看到 Stop 提示"当作"文件没被改写"的信号——回合结束后继续编辑前,先重新 Read 相关文件,否则 Edit 可能匹配失败。候选对策(仅 ZCode 宿主需要;Claude Code 已实证送达,若实现须按宿主区分,避免正常送达时重复打扰):Stop 把"已自动格式化"通知写入 hook-state,由下一次 PostToolUse 在回灌开头转告,绕开 Stop 送达通道。Claude Code 侧**真机已验**(Windows,claude CLI 2.1 无头模式,PowerShell 宿主):PostToolUse 回灌逐字送达模型;Stop additionalContext 以 `hook_additional_context` 注入并**驱动模型续回合**(与 ZCode 相反,送达通道完好);曾发现两层问题并已修复:① Windows Claude Code 无 Bash 工具、shell 为 PowerShell,matcher 未含时防旁路门完全空转(`echo > x.java` 真机落盘)——matcher 增补 `PowerShell` + runner 增补 cmdlet 检测;② 复测又暴露 deny 输出为 legacy 形状,被 v2.1.278 的 schema 校验整体拒绝且 fail-open 放行(deny 分支在该宿主从未真正生效)——deny 已按宿主分派(见上表)。两修后真机复测:两种 PowerShell 旁路均被拦下、拒绝理由送达模型。另注意:PowerShell `>` 重定向写文件自带 UTF-8 BOM。
 
-- **格式化双层取舍**:本 hook 用 google-java-format(4 空格/100 列),pom 侧 Spotless
-  (palantir,120 列)与它风格不同——并存时的重排代价与两种消振办法(关
-  `formatter.enabled` / Spotless 改配 googleJavaFormat AOSP)见
-  `docs/CODE_QUALITY_TOOLS.md` 第 5 节。将来可选:formatter 委托项目 Spotless 的 mode
-  (风格单一来源,代价是每次编辑走一次 Maven),真实项目感到痛时再实现。
+- **格式化双模式(回合末自动分派)**:根 `pom.xml` 声明了 `spotless-maven-plugin` 时,
+  回合末格式化**委托 `mvn spotless:apply`**——格式权威唯一归 pom 的 Spotless,与交付
+  门禁 `spotless:check` 不再互踩;hook 前后比对文件哈希,只有真实被重写的文件才提示
+  重新 Read。未声明则走自带 google-java-format(4 空格/100 列,离线自包含)。边界:
+  **只探测根 pom**,子模块单独配 Spotless 不识别(该布局仍走 GJF 兜底,与该模块
+  Spotless 的互踩取舍见 `docs/CODE_QUALITY_TOOLS.md` 第 5 节),需委托就把插件声明
+  提级到根 pom;委托需 mvnw/mvn,缺失时记提示跳过本次格式化。
 - 其余边界(hook 不替代 verify/CI、工具 JVM 与项目 JDK 解耦)见 `scripts/README.md`。
 
 ### Codex(OpenAI Codex CLI)——资产已备,未真机验证

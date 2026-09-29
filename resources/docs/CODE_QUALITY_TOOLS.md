@@ -102,8 +102,9 @@ Coding Guidelines,人工在编辑器里用,**AI 无法感知它**,对 AI 只有 
 - 运行时要求 JDK 11+。
 - 团队若要和 IDEA 格式化完全一致,可改用 `<eclipse>` formatter + IDEA 导出的
   profile 文件,配置成本高一些。
-- 与编辑期 hook 并存:hook 直调的 google-java-format 是 4 空格/100 列,与 palantir 的
-  120 列不同,双层并存的重排取舍与消振办法见第 5 节。
+- 与编辑期 hook 并存:按本节配进**根 pom** 后,hook 回合末格式化自动委托
+  `mvn spotless:apply`(风格权威唯一,两层不再互踩);未配时 hook 用自带
+  google-java-format(4 空格/100 列)离线兜底,取舍见第 5 节。
 - 日常开发:**写完代码先 `mvn spotless:apply` 自动格式化**,`check` 留给 verify/CI。
 
 ## 3. 安全检查:SpotBugs(+FindSecBugs)与 OWASP dependency-check
@@ -183,9 +184,11 @@ dependency-check。两个互补,都要。
 verify/CI 是确定性全量门禁**,两者互补;交付前另需 AI 全量评审(上一版本..本版本
 diff,见 AGENTS.md 交付门禁段)。
 
-**格式化的双层取舍**:hook 用 google-java-format(4 空格/100 列,风格固定),本手册
-第 2 节的 Spotless 用 palantir(4 空格/120 列)。两层风格不同,同时启用时以 pom 的
-Spotless 为最终裁决——交付前 `mvn spotless:apply` 会把代码重排为 120 列,hook 在下次
-编辑又按 100 列自动重排,属已知代价。不能接受重排的项目二选一:关闭 hook 的
-`formatter.enabled`,或把第 2 节 Spotless 改配 `<googleJavaFormat><style>AOSP</style></googleJavaFormat>`
-与 hook 对齐(消振,代价是放弃 120 列、偏离手册列宽条款)。
+**格式化的双模式协作**:hook 回合末格式化按根 pom 自动分派——根 pom 按第 2 节配了
+Spotless 时,hook **委托 `mvn spotless:apply`**(风格权威唯一归 pom,与
+`spotless:check` 门禁零互踩);未配时用自带 google-java-format(4 空格/100 列)离线
+兜底。边界:hook 只探测**根 pom**,子模块单独配 Spotless 不识别——那种布局下两层风格
+仍会互踩(palantir 120 列 vs GJF 100 列),需委托就把插件声明提级到根 pom;不能提级时
+二选一消振:关闭 hook 的 `formatter.enabled`,或把 Spotless 改配
+`<googleJavaFormat><style>AOSP</style></googleJavaFormat>` 与 hook 对齐(代价是放弃
+120 列、偏离手册列宽条款)。

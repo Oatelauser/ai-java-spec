@@ -11,7 +11,7 @@
 | **写入前高危拦截** | 密钥/凭据正则检测(毫秒级) | 每次 Edit/Write 一个 `.java` **之前** | 命中即 deny,坏代码不落盘 |
 | **命令门禁** | 防旁路检测 + 评审状态校验 | 每次 Bash/PowerShell **之前** | 拦"shell 直写 `.java`";`git commit/push` 前校验评审状态标记 |
 | 规范+安全评审 | OCR delegate(宿主模型评审) | 回合末提醒 + `/delegate-review` 命令 | 规约来自 `.opencodereview/rule.json`(p3c 蒸馏)+ ocr 内置规则 |
-| 格式化 | google-java-format(`--aosp`,4 空格) | **回合结束(Stop)统一修复** | 回合内不重写文件,编辑缓存不失效 |
+| 格式化 | 根 pom 配 Spotless → 委托 `mvn spotless:apply`;未配 → 自带 google-java-format(`--aosp`,4 空格,离线) | **回合结束(Stop)统一修复** | 回合内不重写文件,编辑缓存不失效;只探测根 pom |
 | 深度安全(可选,默认关) | 编译 + SpotBugs + FindSecBugs | 回合结束(Stop) | 只扫 `target/classes` 字节码 |
 
 - `PreToolUse`(Edit\|Write):**确定性高危**(硬编码密钥/口令/云厂商 Key)写入前 deny 并回灌修复建议——只有这类才阻断,其余走回合级评审(分级响应)。
@@ -35,7 +35,7 @@ scripts/upgrade.js         依赖版本查新与整批升级统一入口
 .tools/                    工具缓存(自动创建并写入 .gitignore)
 ```
 
-`hook-config.json` 常用字段:`formatter.*`(格式化开关/版本/风格)、`deepScan.enabled`(深度扫描,默认关)、`performance.stopMaxFiles`(Stop 层评审清单上限,默认 30,超额标注 partial/INCONCLUSIVE)、`failureMode`(`open`=检查异常时降级放行并留痕/`strict`=阻断,默认 open)、`feedback`(`important`=默认/`quiet`=只留违规压掉格式化与备注提示)。**工具 JVM 与项目 JDK 解耦**:工具只需 `JAVA_HOME`(JDK 11+)。格式化与 pom Spotless 并存的重排取舍见 `docs/CODE_QUALITY_TOOLS.md` 第 5 节。
+`hook-config.json` 常用字段:`formatter.*`(格式化开关/版本/风格)、`deepScan.enabled`(深度扫描,默认关)、`performance.stopMaxFiles`(Stop 层评审清单上限,默认 30,超额标注 partial/INCONCLUSIVE)、`failureMode`(`open`=检查异常时降级放行并留痕/`strict`=阻断,默认 open)、`feedback`(`important`=默认/`quiet`=只留违规压掉格式化与备注提示)。**工具 JVM 与项目 JDK 解耦**:工具只需 `JAVA_HOME`(JDK 11+)。根 pom 配 Spotless 时格式化自动委托 `spotless:apply`(与 pom 门禁零互踩),分派规则与子模块例外见 `docs/CODE_QUALITY_TOOLS.md` 第 5 节。
 
 `ocr`(open-code-review)是全局 npm CLI,不在 `.tools/` 缓存内:缺失时编辑期评审降级(Stop 提示跳过、git 门按 `failureMode` 处理),安装 `npm install -g @alibaba-group/open-code-review`(要求 ≥v1.9.0,实测基线 v1.12.9)。版本查新与升级的统一入口是 `node scripts/upgrade.js`(`--check` 只查不升;`--offline <包目录>` 零网络应用离线升级包——目录内含 `manifest.json` 与工具文件,应用前逐文件校验 sha256,无包时走默认在线模式)。
 
