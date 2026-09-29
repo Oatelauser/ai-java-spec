@@ -5,7 +5,9 @@
  * 项目级质量 hook runner —— ZCode PostToolUse / Stop 事件的统一入口。
  *
  * 确定性检查项(全部由 scripts/hook-config.json 开关/换版本,脚本本身零版本感知):
- *   formatter  google-java-format(style 可配 aosp/google),回合末统一自动修复
+ *   formatter  双模式:根 pom 配 spotless-maven-plugin → 委托 mvn spotless:apply(格式权威唯一,
+ *              避免与 pom 交付门禁互踩);未配 → 自带 google-java-format(style 可配 aosp/google,
+ *              离线自包含)。均在回合末统一自动修复
  *   deepScan   可选:编译后 SpotBugs+FindSecBugs 字节码扫描(默认关,仅 Stop 层)
  *
  * 规范/安全/逻辑评审由 open-code-review(ocr)delegate 模式承担(宿主模型、零 API key):
@@ -31,6 +33,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { spawnSync } = require('child_process');
+const crypto = require('crypto');
 
 // 沙箱/代理环境常设 NODE_TLS_REJECT_UNAUTHORIZED=0,node 会往 stderr 打警告污染 hook 回灌,压掉
 process.removeAllListeners('warning');
@@ -77,6 +80,7 @@ async function handleWarmup() {
       [path.join(TOOLS_DIR, 'google-java-format', `google-java-format-${cfg.formatter.version}-all-deps.jar`)],
     );
     console.log(`[warmup] google-java-format ${cfg.formatter.version} 就绪: ${path.relative(ROOT, jar)}`);
+    console.log('[warmup] 检测到根 pom 配 Spotless 时,格式化将委托 mvn spotless:apply(未配则用上述 GJF 离线兜底)');
   }
   if (cfg.deepScan && cfg.deepScan.enabled) {
     const home = await ensureSpotBugs();
@@ -308,7 +312,40 @@ function attachOcrReviewReminder(result) {
   ].join('\n'));
 }
 
+// 双模式分派:根 pom 配了 spotless-maven-plugin → 委托 mvn spotless:apply(根 pom 未配
+// Spotless 的下游保持离线 GJF,模板"拷贝即用/断网可格式化"特性不破坏);
+// 仅识别根 pom——子模块单独配置 Spotless 不探测,需下游把插件声明提级到根 pom(文档注明)
+function hasSpotlessPlugin() {
+  try {
+    return fs.existsSync(path.join(ROOT, 'pom.xml'))
+      && fs.readFileSync(path.join(ROOT, 'pom.xml'), 'utf8').includes('<artifactId>spotless-maven-plugin</artifactId>');
+  } catch {
+    return false; // pom 读取失败按未配置处理,走 GJF 兜底
+  }
+}
+
 async function runFormatter(files, result) {
+  if (hasSpotlessPlugin()) return delegateSpotless(files, result);
+  return formatViaGjf(files, result);
+}
+
+// 委托版:hook 只当触发器,格式权威在根 pom 的 Spotless 配置;前后 md5 对比只把真实被
+// 重写的文件放进 fixed(保持原 fixed 语义与"请重新 Read"提示);spotless 失败进 violations
+async function delegateSpotless(files, result) {
+  const mvn = detectMaven();
+  if (!mvn) return result.notes.push('格式化未执行: 根 pom 配了 Spotless 但未找到 mvnw / mvn');
+
+  const before = new Map(files.map(f => [f, fileHash(f)]));
+  const r = run(mvn.cmd, ['-q', 'spotless:apply'], { timeoutMs: 600000, cwd: ROOT });
+  if (r.status !== 0) {
+    return result.violations.push(`spotless:apply 失败(请先修正): ${brief(r.stderr || r.stdout, 5)}`);
+  }
+  const rewritten = files.filter(f => fileHash(f) !== before.get(f));
+  if (rewritten.length > 0) result.fixed.push(...rewritten);
+}
+
+// 兜底版:自带 GJF 离线格式化,行为与无 Spotless 的现状完全一致
+async function formatViaGjf(files, result) {
   const jar = await ensureTool(
     path.join(TOOLS_DIR, 'google-java-format', `gjf-${cfg.formatter.version}.jar`),
     gjfDownloadUrls(cfg.formatter.version),
@@ -339,6 +376,14 @@ async function runFormatter(files, result) {
     result.fixed.push(...files);
   } else {
     result.violations.push(`多轮格式化后仍未通过复验(多为语法错误,请先修正): ${brief(verify.stderr || verify.stdout, 5)}`);
+  }
+}
+
+function fileHash(p) {
+  try {
+    return crypto.createHash('md5').update(fs.readFileSync(p)).digest('hex');
+  } catch {
+    return null; // 读失败(并发删除等)视为未变化,不参与重写判定
   }
 }
 
