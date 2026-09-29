@@ -22,8 +22,9 @@
  *  - ocr 的有无用 PATH 控制:临时目录放 ocr 桩并前插 PATH = 确定性"已安装";
  *    PATH 置空 = 确定性"未安装"。评审 LLM 的结论不进断言(只断 preview 通道的外壳行为);
  *  - fixture 全部放 .selftest-tmp/,结束删除;测试前备份 .tools/hook-state,结束后还原;
- *  - git 用例临时 git init + 空初始提交(指纹源含 git diff HEAD,无提交时必败;
- *    hook-lab 原本无 .git),结束 rm -rf .git;
+ *  - git 用例临时 git init + 空初始提交(指纹源含 git diff HEAD,无提交时必败);
+ *    LAB 预存 .git(真实仓库)时 git 用例整体跳过(防污染真实历史/误删 .git,见 gitGuard),
+ *    自建的临时 .git 结束 rm -rf;
  *  - P11/B6 是"记录实际行为"用例(疑似误报):只如实记录行为,不以断言迁就,也不计 FAIL。
  *
  * fixture 内容对 google-java-format 1.36.1(aosp)实测校准:BAD_JAVA/CLEAN_JAVA 已符合
@@ -43,7 +44,13 @@ const STATE_DIR = path.join(LAB, '.tools', 'hook-state');
 const QUEUE_FILE = path.join(STATE_DIR, 'touched-files.txt');
 const PREVIEW_FILE = path.join(STATE_DIR, 'ocr-preview.txt');
 const REVIEW_MARK_FILE = path.join(STATE_DIR, 'ocr-review.json');
-const BACKUP_DIR = path.join(TMP, '.hook-state-backup');
+// 备份目录不得落在 TMP 内:try 块开头会 rmTree(TMP) 整个清场,备份会被自己人先销毁
+// (2026-09-29 jauth-hub 实测:恢复必然 ENOENT,hook-state 丢失)
+const BACKUP_DIR = path.join(LAB, '.selftest-backup');
+// 真实仓库保护(2026-09-29 jauth-hub 事故):LAB 自带 .git(下游项目把 selftest 拷到真实
+// 仓库里跑)时,git 夹具会污染真实历史、收尾还会把真实 .git 当临时仓库删掉。模块加载期
+// 钉住"是否预存 .git",git 相关用例整体跳过。
+const REAL_GIT = fs.existsSync(GIT_DIR);
 
 // ---------------------------------------------------------------- 基础设施
 
@@ -59,6 +66,7 @@ function runCase(id, fn) {
   try {
     fn();
   } catch (e) {
+    if (e && e.skipGit) return record(id, true, `跳过: ${e.message}`);
     record(id, false, `套件自身异常: ${e && e.message}`);
   }
 }
@@ -130,8 +138,19 @@ function makeOcrStub() {
   return dir;
 }
 
+// git 夹具的统一闸口:LAB 预存 .git 时所有会写真实仓库的用例以 skipGit 异常短路,
+// runCase 捕获后按"跳过"记录,既不污染真实历史、也不留误删风险
+function gitGuard() {
+  if (REAL_GIT) {
+    const e = new Error('LAB 预存 .git(真实仓库),git 用例跳过——防夹具污染真实历史/收尾误删 .git');
+    e.skipGit = true;
+    throw e;
+  }
+}
+
 // 指纹的 diff 源是 git diff HEAD,仓库无任何提交时该命令必败 → init 后补一个空初始提交
 function gitInitOrFail() {
+  gitGuard();
   const init = spawnSync('git', ['init'], { cwd: LAB, encoding: 'utf8', timeout: 60000 });
   if (init.status !== 0) throw new Error(`git init 失败: ${init.stderr || ''}`);
   gitRun(['-c', 'user.email=selftest@local', '-c', 'user.name=selftest', 'commit', '--allow-empty', '-m', 'selftest-init']);
@@ -139,6 +158,7 @@ function gitInitOrFail() {
 
 // 测试内直接跑 git(不经宿主与门禁,仅用于铺底:初始提交、把夹具纳入版本管理等)
 function gitRun(args) {
+  gitGuard();
   const r = spawnSync('git', args, { cwd: LAB, encoding: 'utf8', timeout: 60000 });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')} 失败: ${(r.stderr || '').trim()}`);
   return r;
@@ -448,6 +468,7 @@ function bashCases() {
   });
 
   runCase('B10', () => {
+    gitGuard();
     const stubDir = makeOcrStub();
     const mark = reviewMark('done');
     if (mark.status !== 0) throw new Error(`review-mark done 失败: ${mark.stderr || mark.stdout}`);
@@ -459,6 +480,7 @@ function bashCases() {
   });
 
   runCase('B11', () => {
+    gitGuard();
     const stubDir = makeOcrStub();
     const mark = reviewMark('done'); // extra.txt 已在指纹内,重新标记 → 匹配
     if (mark.status !== 0) throw new Error(`review-mark done 失败: ${mark.stderr || mark.stdout}`);
@@ -473,6 +495,7 @@ function bashCases() {
 
   // 内容盲区钉子①:标记后仅改"未跟踪脏 .java"的内容——status 行集不变,归一化内容哈希须使指纹漂移
   runCase('B18', () => {
+    gitGuard();
     const stubDir = makeOcrStub();
     wipeState();
     const p = writeFixture(path.join('gitcase', 'Untracked.java'), CLEAN_JAVA);
@@ -505,6 +528,7 @@ function bashCases() {
 
   // 大小写旁路:Windows 可执行名大小写不敏感,Git commit 不能绕过 git 门
   runCase('B20', () => {
+    gitGuard();
     const stubDir = makeOcrStub();
     wipeState();
     writeFixture(path.join('gitcase', 'Bad.java'), BAD_JAVA);
@@ -518,6 +542,7 @@ function bashCases() {
   // 未跟踪态靠空白归一化哈希;已跟踪已修改态(B19 留下的 Tracked.java)靠 -w patch 过滤。
   // (Stop 层 GJF 回合末自动格式化重写文件不得作废指纹)
   runCase('B21', () => {
+    gitGuard();
     const stubDir = makeOcrStub();
     wipeState();
     const p = writeFixture(path.join('gitcase', 'Ws.java'), CLEAN_JAVA);
@@ -534,8 +559,8 @@ function bashCases() {
       : `未跟踪态 status=${r1.status} stdout=${(r1.stdout || '').slice(0, 150)};跟踪态 status=${r2.status} stdout=${(r2.stdout || '').slice(0, 150)}`);
   });
 
-  // git 用例结束,立即清掉临时 .git(finally 里还有兜底)
-  if (fs.existsSync(GIT_DIR)) rmTree(GIT_DIR);
+  // git 用例结束,立即清掉临时 .git(finally 里还有兜底);REAL_GIT 下这里必是真实 .git,绝不能删
+  if (!REAL_GIT && fs.existsSync(GIT_DIR)) rmTree(GIT_DIR);
 }
 
 // ---------------------------------------------------------------- review-mark(R1-R3)
@@ -544,6 +569,7 @@ function reviewMarkCases() {
   try {
     gitInitOrFail();
   } catch (e) {
+    if (e && e.skipGit) return record('R1', true, `跳过: ${e.message}`);
     record('R1', false, `git init 失败,R 段跳过: ${e.message}`);
     return;
   }
@@ -580,7 +606,7 @@ function reviewMarkCases() {
       record('R3', ok, ok ? '指纹对工作区变化敏感(加文件变、删掉复原)' : `fp1=${fp1} fp2=${fp2} fp3=${fp3}`);
     });
   } finally {
-    if (fs.existsSync(GIT_DIR)) rmTree(GIT_DIR);
+    if (!REAL_GIT && fs.existsSync(GIT_DIR)) rmTree(GIT_DIR);
   }
 }
 
@@ -702,6 +728,8 @@ function stopCases() {
   });
 
   runCase('S7', () => {
+    // S7 前提是"队列空且 git 干净/无 git":真实仓库里未跟踪夹具 .java 会经 git 兜底进入聚合,前提不成立
+    gitGuard();
     wipeState();
     const res = hook('stop', {});
     const ok = res.status === 0 && !(res.stdout || '').trim() && !(res.stderr || '').trim();
@@ -761,6 +789,7 @@ function main() {
     } catch (e) {
       console.error(`[selftest] hook-state 恢复失败: ${e.message}`);
     }
+    rmTree(BACKUP_DIR);
     if (!hadGit && fs.existsSync(GIT_DIR)) rmTree(GIT_DIR);
     rmTree(TMP);
   }
