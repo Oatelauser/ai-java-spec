@@ -86,6 +86,8 @@ delegate 模式下 `ocr` 端**零 LLM 调用、零 API key**——它只出清�
   - 防旁路:检测 heredoc/重定向/`sed -i`/`tee` 及 PowerShell 的 `Out-File`/`Set-Content`/`Add-Content`/`.NET WriteAll*` 直接写改 `.java`,deny 并引导改用 Write/Edit 进入受控链路;
   - Git 门:`git commit/push` 前做**评审状态标记校验**(不再重跑静态分析)。标记由 `scripts/review-mark.js` 在评审完成时写入,内含评审时刻的 diff 指纹——改动未评审、或评审之后又有新 `.java` 改动(指纹不匹配)即阻断;ocr CLI 缺失时按 `failureMode` 降级(`open`=留痕放行/`strict`=拒绝)。
 - **Stop(回合末)**:格式化自动修复(双模式:根 pom 配 Spotless 即委托 `mvn spotless:apply`,否则自带 google-java-format,见第 6 节"格式化双模式")+ 可选深度扫描 + **评审提醒**——同步跑 `ocr delegate preview`,把文件清单与规则预注入上下文(best-effort,送达依赖宿主),并落 hook-state 供 git 门比对;清单超过 `performance.stopMaxFiles`(默认 30)时截断,超额部分标注 partial/INCONCLUSIVE,提示分批评审。
+  - **播报边沿触发去重**:聚合播报的指纹 = touched 文件的(相对路径 + 内容 md5)集合(落 `.tools/hook-state/stop-broadcast.json`),内容与文件集不变则静默(reminders/violations/notes 均不发),一变即播、首次必播;本回合真实重写过文件(自动格式化)时必播("请重新 Read"提示不可丢)。只压制播报注入,PREVIEW_FILE 照常落盘、git 门不受影响——防编排场景(主会话派 subagent 写码)下"工作区有未提交 `.java` 就每回合重播同内容"的风暴。
+  - **在途文件防护**:spotless:apply / GJF 复验 / deepScan 编译失败时,失败文件(按报错输出 basename 反查,反查不到按本回合聚合集兜底)mtime 距今在 `formatter.inFlightWindowSec`(默认 30s)内 → 视为并发 subagent 在途写入,记 note 不记 violation;在途回合不落播报指纹,文件定稿后下回合复检结果必播(自愈则静默收敛)。
 - PostToolUse(Edit|Write)对 `.java` 只做队列标记、不做检查(省去每次编辑的外部进程开销),检查收敛到回合级 delegate 评审。
 
 **信任模型(如实)**:git 门是"标记校验"而非"客观复检"——防遗忘、防偷懒,不防伪造(AI 理论上可手写标记或改 hook 脚本自毁门禁;这与引入前"AI 可绕过静态分析工具"是同级风险)。真正的确定性兜底是交付前的 pom 三类检查与 AI 全量评审流程。

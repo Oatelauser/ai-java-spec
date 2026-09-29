@@ -19,6 +19,11 @@
  * 增量策略:Stop 聚合本回合 touched files,统一格式化(重写)+ deepScan,兜住 Bash 写文件等绕过路径。
  *           格式化重写刻意只在回合末做:编辑中途重写会立刻作废 agent 的文件缓存
  *           (连续撞 Edit 的 modified-since-read 护栏),并误删增量编辑中间态的无引用 import。
+ * 播报去重:Stop 播报边沿触发——指纹(touched 文件的路径+内容哈希集合)不变不重播,防编排场景
+ *           (主会话派 subagent 写码)下同内容播报风暴;git 门的评审标记校验不受影响。
+ * 在途防护:formatter 或 deepScan 编译失败时,mtime 新鲜(默认 30s,可配 formatter.inFlightWindowSec)
+ *           的失败文件视为并发 subagent 在途写入,记 note 不记 violation;在途回合不落播报
+ *           指纹,定稿后下回合复检结果必播。
  *
  * 反馈协议(实测校准):有违规或发生自动格式化 → stdout 输出 additionalContext JSON 注入会话回灌给 agent
  *           (PostToolUse 的 stderr/exit2 通道不注入,勿改回);干净 → 静默;runner 自身故障 → 留痕不阻塞。
@@ -49,6 +54,7 @@ const STATE_DIR = path.join(TOOLS_DIR, 'hook-state');
 const QUEUE_FILE = path.join(STATE_DIR, 'touched-files.txt');
 const PREVIEW_FILE = path.join(STATE_DIR, 'ocr-preview.txt');
 const REVIEW_MARK_FILE = path.join(STATE_DIR, 'ocr-review.json');
+const LAST_BROADCAST_FILE = path.join(STATE_DIR, 'stop-broadcast.json');
 const IS_WIN = process.platform === 'win32';
 
 const cfg = loadConfig();
@@ -267,11 +273,11 @@ async function handleStop() {
 
   const result = { violations: [], notes: [], fixed: [], reminders: [] };
   if (cfg.formatter && cfg.formatter.enabled) await runFormatter(checked, result);
-  if (cfg.deepScan && cfg.deepScan.enabled) await runDeepScan(result);
+  if (cfg.deepScan && cfg.deepScan.enabled) await runDeepScan(checked, result);
   if (skipped > 0) result.notes.push(`另有 ${skipped} 个改动文件未复查(超过 performance.stopMaxFiles=${cap},partial/INCONCLUSIVE)`);
   attachOcrReviewReminder(result);
   clearQueue();
-  return report(result, `回合聚合复查(${checked.length} 个 .java)`);
+  return reportStop(result, files, `回合聚合复查(${checked.length} 个 .java)`);
 }
 
 // ---------------------------------------------------------------- ocr delegate 评审提醒(Stop 层)
@@ -330,7 +336,8 @@ async function runFormatter(files, result) {
 }
 
 // 委托版:hook 只当触发器,格式权威在根 pom 的 Spotless 配置;前后 md5 对比只把真实被
-// 重写的文件放进 fixed(保持原 fixed 语义与"请重新 Read"提示);spotless 失败进 violations
+// 重写的文件放进 fixed(保持原 fixed 语义与"请重新 Read"提示);spotless 失败先进在途
+// 防护(mtime 新鲜 = 疑并发写入,记 note)再进 violations
 async function delegateSpotless(files, result) {
   const mvn = detectMaven();
   if (!mvn) return result.notes.push('格式化未执行: 根 pom 配了 Spotless 但未找到 mvnw / mvn');
@@ -338,10 +345,50 @@ async function delegateSpotless(files, result) {
   const before = new Map(files.map(f => [f, fileHash(f)]));
   const r = run(mvn.cmd, ['-q', 'spotless:apply'], { timeoutMs: 600000, cwd: ROOT });
   if (r.status !== 0) {
-    return result.violations.push(`spotless:apply 失败(请先修正): ${brief(r.stderr || r.stdout, 5)}`);
+    if (!downgradeInFlightFailure(files, r, result, 'spotless:apply')) {
+      result.violations.push(`spotless:apply 失败(请先修正): ${brief(r.stderr || r.stdout, 5)}`);
+    }
+    return;
   }
   const rewritten = files.filter(f => fileHash(f) !== before.get(f));
   if (rewritten.length > 0) result.fixed.push(...rewritten);
+}
+
+// ---------------------------------------------------------------- 在途文件防护
+
+// 在途写入窗口(可配 formatter.inFlightWindowSec,默认 30s):失败文件 mtime 落在窗口内
+// 视为并发写者(编排场景的 subagent)仍在写,半截 java 引发的瞬态解析错误不记违规,
+// 文件定稿后下回合复跑自愈
+const IN_FLIGHT_WINDOW_MS = ((cfg.formatter && cfg.formatter.inFlightWindowSec) || 30) * 1000;
+
+function isInFlight(p) {
+  try {
+    return Date.now() - fs.statSync(p).mtimeMs < IN_FLIGHT_WINDOW_MS;
+  } catch {
+    return false; // stat 失败(并发删除等)不按在途处理
+  }
+}
+
+// formatter 失败的在途降级:尽力从报错输出按 basename 反查失败文件(反查不到退回整集
+// 启发式)再查 mtime——全部失败文件都在途 → 记 note 并返回 true(调用方不记 violation,
+// 留待下回合复检);部分在途 → note 标注在途者但仍返回 false(真实失败不能被在途噪音洗掉)。
+// 只要本轮有在途参与即打 inFlightHit:该回合视为"未定稿",reportStop 不落播报指纹,
+// 否则复检出的真实 violation 会被同状态去重吞掉,复检承诺落空
+function downgradeInFlightFailure(files, r, result, label) {
+  const out = `${r.stderr || ''}\n${r.stdout || ''}`;
+  const mentioned = new Set((out.match(/[\w./\\-]+\.java/g) || []).map(p => path.basename(p)));
+  const failed = files.filter(f => mentioned.has(path.basename(f)));
+  const candidates = failed.length > 0 ? failed : files;
+  const inFlight = candidates.filter(isInFlight);
+  if (inFlight.length === 0) return false;
+  result.inFlightHit = true;
+  const names = inFlight.map(f => path.relative(ROOT, f)).join(', ');
+  if (inFlight.length === candidates.length) {
+    result.notes.push(`${label}失败,失败文件近 ${Math.round(IN_FLIGHT_WINDOW_MS / 1000)}s 内有修改(疑并发在途写入,不记违规,下回合复检): ${names}`);
+    return true;
+  }
+  result.notes.push(`${label}失败,以下文件近 ${Math.round(IN_FLIGHT_WINDOW_MS / 1000)}s 内有修改,疑在途写入(不计入失败): ${names}`);
+  return false;
 }
 
 // 兜底版:自带 GJF 离线格式化,行为与无 Spotless 的现状完全一致
@@ -374,7 +421,7 @@ async function formatViaGjf(files, result) {
   }
   if (verify.status === 0) {
     result.fixed.push(...files);
-  } else {
+  } else if (!downgradeInFlightFailure(files, verify, result, '格式化复验')) {
     result.violations.push(`多轮格式化后仍未通过复验(多为语法错误,请先修正): ${brief(verify.stderr || verify.stdout, 5)}`);
   }
 }
@@ -387,7 +434,8 @@ function fileHash(p) {
   }
 }
 
-async function runDeepScan(result) {
+// files 仅用于编译失败时的在途降级判定(与 formatter 同一防护);扫描本体仍是全工程字节码
+async function runDeepScan(files, result) {
   if (!fs.existsSync(path.join(ROOT, 'pom.xml'))) {
     return result.notes.push('deepScan 未执行: 根目录未检测到 pom.xml(当前仅支持 Maven 项目)');
   }
@@ -396,7 +444,10 @@ async function runDeepScan(result) {
 
   const compiled = run(mvn.cmd, ['-q', '-DskipTests', 'compile'], { timeoutMs: 600000, cwd: ROOT });
   if (compiled.status !== 0) {
-    return result.violations.push(`[deepScan] 编译失败,SpotBugs 未执行(先修编译错误):\n${brief(compiled.stderr || compiled.stdout, 5)}`);
+    if (!downgradeInFlightFailure(files, compiled, result, '[deepScan] 编译')) {
+      result.violations.push(`[deepScan] 编译失败,SpotBugs 未执行(先修编译错误):\n${brief(compiled.stderr || compiled.stdout, 5)}`);
+    }
+    return;
   }
 
   const home = await ensureSpotBugs().catch(e => result.notes.push(`SpotBugs 就绪失败(已跳过): ${e.message}`) && null);
@@ -421,6 +472,46 @@ async function runDeepScan(result) {
 }
 
 // ---------------------------------------------------------------- 汇报与退出
+
+// Stop 播报边沿触发去重:编排场景(主会话派 subagent 写码)下,只要工作区有未提交 .java,
+// 主会话每回合 Stop 都看到同一状态,同内容聚合播报无限重发(每回一句应答又触发下一轮)。
+// 指纹取"touched 文件的(相对路径+内容 md5)集合":只随真实内容/文件集变化,不受 ocr 输出
+// 格式、杂散临时文件、评审状态影响——内容不变不重播,一变必播,首次必播。与上次播报同
+// 指纹 → 静默跳过(reminders/violations/notes 均不发);只压制播报注入——PREVIEW_FILE
+// 照常落盘、git 门(bash-gate)的评审标记校验不受影响;本回合真实重写过文件(fixed 非空)
+// 时必播,"请重新 Read"提示不可丢。
+function reportStop(result, files, header) {
+  // 在途回合不构成"已播报"语义:上一轮若因在途降级只播了 note,指纹不比对也不落盘,
+  // 保证复检出的终态结果(自愈或真实 violation)必然播出,不被同状态去重吞掉
+  if (result.inFlightHit) {
+    rmFile(LAST_BROADCAST_FILE);
+    return report(result, header);
+  }
+  const fingerprint = crypto.createHash('sha256')
+    .update(files.map(f => `${normalizeSlashes(path.relative(ROOT, f))}\u0001${fileHash(f)}`).sort().join('\u0000'))
+    .digest('hex');
+  if (result.fixed.length === 0 && fingerprint === readLastBroadcast().fingerprint) return 0;
+  saveLastBroadcast(fingerprint);
+  return report(result, header);
+}
+
+function readLastBroadcast() {
+  try {
+    const data = JSON.parse(fs.readFileSync(LAST_BROADCAST_FILE, 'utf8'));
+    return data && typeof data.fingerprint === 'string' ? data : {};
+  } catch {
+    return {}; // 无记录/损坏 = 从未播报,首次必播
+  }
+}
+
+function saveLastBroadcast(fingerprint) {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(LAST_BROADCAST_FILE, `${JSON.stringify({ fingerprint, broadcastAt: new Date().toISOString() }, null, 2)}\n`);
+  } catch {
+    // 落盘失败只是丢失去重(退化为每回合必播),播报本身不受影响
+  }
+}
 
 function report(result, header) {
   // feedback=quiet 时压掉非风险信息(格式化提示/备注),只留违规本身;

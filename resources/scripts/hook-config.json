@@ -4,7 +4,8 @@
     "tool": "google-java-format",
     "version": "1.36.1",
     "style": "aosp",
-    "autoFix": true
+    "autoFix": true,
+    "inFlightWindowSec": 30
   },
   "ocr": {
     "baseline": "1.12.9",

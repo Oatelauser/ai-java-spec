@@ -17,7 +17,7 @@
 - `PreToolUse`(Edit\|Write):**确定性高危**(硬编码密钥/口令/云厂商 Key)写入前 deny 并回灌修复建议——只有这类才阻断,其余走回合级评审(分级响应)。
 - `PreToolUse`(Bash):拦"用 heredoc/重定向/sed -i/tee(及 PowerShell 的 Out-File/Set-Content/Add-Content/.NET WriteAll*)直接写改 `.java`"的旁路,引导改用 Write/Edit 进入受控链路;`git commit/push` 前做**评审状态标记校验**——改动未评审、或评审之后又有新 `.java` 改动即阻断;ocr CLI 缺失时按 `failureMode` 降级(`open` 留痕放行/`strict` 阻断)。
 - `PostToolUse`(matcher `Edit|Write`):只把改动的 `.java` 记入回合队列,不做检查(省外部进程开销),检查收敛到回合级评审。
-- `Stop`:回合末统一做三件事——格式化重写、(可选)深度扫描、**评审提醒**;提醒经 `ocr delegate preview` 取"该审哪些文件+用什么规则"预注入上下文(best-effort,送达依赖宿主)并落 hook-state 供 git 门比对。
+- `Stop`:回合末统一做三件事——格式化重写、(可选)深度扫描、**评审提醒**;提醒经 `ocr delegate preview` 取"该审哪些文件+用什么规则"预注入上下文(best-effort,送达依赖宿主)并落 hook-state 供 git 门比对。播报边沿触发:touched 文件内容不变不重播(防编排场景同内容播报风暴);格式化/编译失败时,近 `formatter.inFlightWindowSec`(默认 30s)有修改的失败文件视为并发在途写入,记 note 不记违规,定稿后下回合复检。
 - 评审执行:用 `/delegate-review` 命令(Claude Code 宿主;其它宿主照 `.claude/commands/delegate-review.md` 手动走),流程 preview → rule → 逐文件评审(覆盖率强制)→ 修复,收尾必须 `node scripts/review-mark.js done` 写评审标记。
 
 ## 布局与配置速查
@@ -35,7 +35,7 @@ scripts/upgrade.js         依赖版本查新与整批升级统一入口
 .tools/                    工具缓存(自动创建并写入 .gitignore)
 ```
 
-`hook-config.json` 常用字段:`formatter.*`(格式化开关/版本/风格)、`deepScan.enabled`(深度扫描,默认关)、`performance.stopMaxFiles`(Stop 层评审清单上限,默认 30,超额标注 partial/INCONCLUSIVE)、`failureMode`(`open`=检查异常时降级放行并留痕/`strict`=阻断,默认 open)、`feedback`(`important`=默认/`quiet`=只留违规压掉格式化与备注提示)。**工具 JVM 与项目 JDK 解耦**:工具只需 `JAVA_HOME`(JDK 11+)。根 pom 配 Spotless 时格式化自动委托 `spotless:apply`(与 pom 门禁零互踩),分派规则与子模块例外见 `docs/CODE_QUALITY_TOOLS.md` 第 5 节。
+`hook-config.json` 常用字段:`formatter.*`(格式化开关/版本/风格/`inFlightWindowSec` 在途写入判定窗口,默认 30s)、`deepScan.enabled`(深度扫描,默认关)、`performance.stopMaxFiles`(Stop 层评审清单上限,默认 30,超额标注 partial/INCONCLUSIVE)、`failureMode`(`open`=检查异常时降级放行并留痕/`strict`=阻断,默认 open)、`feedback`(`important`=默认/`quiet`=只留违规压掉格式化与备注提示)。**工具 JVM 与项目 JDK 解耦**:工具只需 `JAVA_HOME`(JDK 11+)。根 pom 配 Spotless 时格式化自动委托 `spotless:apply`(与 pom 门禁零互踩),分派规则与子模块例外见 `docs/CODE_QUALITY_TOOLS.md` 第 5 节。
 
 `ocr`(open-code-review)是全局 npm CLI,不在 `.tools/` 缓存内:缺失时编辑期评审降级(Stop 提示跳过、git 门按 `failureMode` 处理),安装 `npm install -g @alibaba-group/open-code-review`(要求 ≥v1.9.0,实测基线 v1.12.9)。版本查新与升级的统一入口是 `node scripts/upgrade.js`(`--check` 只查不升;`--offline <包目录>` 零网络应用离线升级包——目录内含 `manifest.json` 与工具文件,应用前逐文件校验 sha256,无包时走默认在线模式)。
 
