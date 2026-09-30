@@ -13,7 +13,7 @@
  *                 B20(git 命令大小写旁路)+ B21(纯空白改动不漂移指纹,GJF 自动格式化友好)
  *   review-mark   R1-R3(status 缺失输出 / done-status 往返 / 指纹对工作区变化敏感)
  *   post-tool-use U1-U4(.java 只入队不再跑检查;.md/忽略路径不入队;append 语义)
- *   stop          S1-S7(格式化 / ocr preview 注入 / ocr 缺失降级 / 截断 / 队列清理)
+ *   stop          S1-S8(格式化 / ocr preview 注入 / ocr 缺失降级 / 截断 / 队列清理 / 委托路径在途推迟)
  *   协议          J1(post/stop 的 stdout 必须是单个可解析 JSON 且 stderr 为空)
  *   warmup        W1(工具已就绪时秒过)
  *
@@ -734,6 +734,33 @@ function stopCases() {
     const res = hook('stop', {});
     const ok = res.status === 0 && !(res.stdout || '').trim() && !(res.stderr || '').trim();
     record('S7', ok, ok ? '空队列 stop:exit0 无输出' : `status=${res.status} stdout=${(res.stdout || '').slice(0, 150)} stderr=${(res.stderr || '').slice(0, 150)}`);
+  });
+
+  runCase('S8', () => {
+    // 委托路径在途推迟:根 pom 声明 spotless + mvn 桩(只应答 -v 探测,exit0 无输出——若推迟
+    // 失效,桩被当真 spotless 跑,不会有任何格式化产出),新鲜 mtime 夹具 → 不跑 spotless、
+    // 记推迟 note、长行原样保留(丢更新防护的可见面)
+    wipeState();
+    const stubDir = makeOcrStub();
+    if (process.platform === 'win32') {
+      fs.writeFileSync(path.join(stubDir, 'mvn.cmd'), '@echo off\r\nexit /b 0\r\n');
+    } else {
+      fs.writeFileSync(path.join(stubDir, 'mvn'), '#!/bin/sh\nexit 0\n');
+      fs.chmodSync(path.join(stubDir, 'mvn'), 0o755);
+    }
+    const pom = path.join(LAB, 'pom.xml');
+    fs.writeFileSync(pom, '<project><artifactId>spotless-maven-plugin</artifactId></project>');
+    try {
+      const p = writeFixture(path.join('s8', 'LongFile.java'), LONG_JAVA);
+      postOn(p);
+      const res = hookPath('stop', {}, stubDir);
+      const ctx = ctxOf(res);
+      const untouched = maxLineLen(p) > 100;
+      const ok = res.status === 0 && ctx.includes('格式化推迟') && untouched;
+      record('S8', ok, ok ? '委托路径在途推迟:新鲜 mtime 文件不跑 spotless,记推迟 note,长行原样' : `status=${res.status} untouched=${untouched} ctx=${ctx.slice(0, 200)}`);
+    } finally {
+      rmTree(pom); // 删除走 rmTree:fs.rmSync 在 Windows 非 ASCII 路径静默失效(套件既定约定)
+    }
   });
 }
 

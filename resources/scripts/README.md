@@ -17,7 +17,7 @@
 - `PreToolUse`(Edit\|Write):**确定性高危**(硬编码密钥/口令/云厂商 Key)写入前 deny 并回灌修复建议——只有这类才阻断,其余走回合级评审(分级响应)。
 - `PreToolUse`(Bash):拦"用 heredoc/重定向/sed -i/tee(及 PowerShell 的 Out-File/Set-Content/Add-Content/.NET WriteAll*)直接写改 `.java`"的旁路,引导改用 Write/Edit 进入受控链路;`git commit/push` 前做**评审状态标记校验**——改动未评审、或评审之后又有新 `.java` 改动即阻断;ocr CLI 缺失时按 `failureMode` 降级(`open` 留痕放行/`strict` 阻断)。
 - `PostToolUse`(matcher `Edit|Write`):只把改动的 `.java` 记入回合队列,不做检查(省外部进程开销),检查收敛到回合级评审。
-- `Stop`:回合末统一做三件事——格式化重写、(可选)深度扫描、**评审提醒**;提醒经 `ocr delegate preview` 取"该审哪些文件+用什么规则"预注入上下文(best-effort,送达依赖宿主)并落 hook-state 供 git 门比对。播报边沿触发:touched 文件内容不变不重播(防编排场景同内容播报风暴);格式化/编译失败时,近 `formatter.inFlightWindowSec`(默认 30s)有修改的失败文件视为并发在途写入,记 note 不记违规,定稿后下回合复检。
+- `Stop`:回合末统一做三件事——格式化重写、(可选)深度扫描、**评审提醒**;提醒经 `ocr delegate preview` 取"该审哪些文件+用什么规则"预注入上下文(best-effort,送达依赖宿主)并落 hook-state 供 git 门比对。播报边沿触发:touched 文件内容不变不重播(防编排场景同内容播报风暴);在途防护两道:委托 spotless:apply 前任一 touched 文件近 `formatter.inFlightWindowSec`(默认 30s)有修改即整体推迟本轮格式化(防 spotless"读→写回"窗口覆盖并发编辑丢更新,下回合复跑,mvn verify 兜底;GJF 兜底路径不推迟),格式化/编译失败时同窗口内有修改的失败文件视为并发在途写入,记 note 不记违规,定稿后下回合复检。
 - 评审执行:用 `/delegate-review` 命令(Claude Code 宿主;其它宿主照 `.claude/commands/delegate-review.md` 手动走),流程 preview → rule → 逐文件评审(覆盖率强制)→ 修复,收尾必须 `node scripts/review-mark.js done` 写评审标记。
 
 ## 布局与配置速查

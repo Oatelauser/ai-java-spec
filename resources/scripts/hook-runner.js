@@ -21,9 +21,14 @@
  *           (连续撞 Edit 的 modified-since-read 护栏),并误删增量编辑中间态的无引用 import。
  * 播报去重:Stop 播报边沿触发——指纹(touched 文件的路径+内容哈希集合)不变不重播,防编排场景
  *           (主会话派 subagent 写码)下同内容播报风暴;git 门的评审标记校验不受影响。
- * 在途防护:formatter 或 deepScan 编译失败时,mtime 新鲜(默认 30s,可配 formatter.inFlightWindowSec)
- *           的失败文件视为并发 subagent 在途写入,记 note 不记 violation;在途回合不落播报
- *           指纹,定稿后下回合复检结果必播。
+ * 在途防护:两道。其一在委托格式化(spotless:apply)之前——任一 touched 文件 mtime 新鲜
+ *           (默认 30s,可配 formatter.inFlightWindowSec)即整体推迟本轮格式化:spotless 是
+ *           "读→写回",窗口内并发 subagent 落盘的编辑会被旧快照静默覆盖且记为"已格式化"
+ *           (丢更新);推迟只记 note 不落 inFlightHit(指纹照常比对/落盘,防推迟 note 同状态
+ *           重播),mvn verify 的 spotless:check 兜底(GJF 兜底路径窗口毫秒级且无 verify 链,
+ *           不推迟)。其二在失败路径——formatter/deepScan 编译失败时,mtime 新鲜的失败文件
+ *           视为并发在途写入,记 note 不记 violation;该类在途回合不落播报指纹,定稿后下回合
+ *           复检结果必播。
  *
  * 反馈协议(实测校准):有违规或发生自动格式化 → stdout 输出 additionalContext JSON 注入会话回灌给 agent
  *           (PostToolUse 的 stderr/exit2 通道不注入,勿改回);干净 → 静默;runner 自身故障 → 留痕不阻塞。
@@ -341,6 +346,16 @@ async function runFormatter(files, result) {
 async function delegateSpotless(files, result) {
   const mvn = detectMaven();
   if (!mvn) return result.notes.push('格式化未执行: 根 pom 配了 Spotless 但未找到 mvnw / mvn');
+
+  // 在途防护前置到成功路径(仅委托路径;GJF 兜底是逐文件毫秒级窗口且无 verify 兜底链,
+  // 不推迟,保持同回合格式化):spotless 是"读→写回",全仓跑一轮期间并发 subagent 落盘的
+  // 编辑会被旧快照静默覆盖且记为"已格式化"(丢更新)。任一文件在途(窗口内有改动)即整体
+  // 推迟本轮格式化,复用"下回合复跑自愈"语义,mvn verify 的 spotless:check 兜底;只记
+  // note 不打 inFlightHit——推迟不产生待复检终态,指纹照常比对/落盘,防推迟 note 同状态重播
+  const inFlight = files.filter(isInFlight);
+  if (inFlight.length > 0) {
+    return result.notes.push(`格式化推迟: 以下文件近 ${Math.round(IN_FLIGHT_WINDOW_MS / 1000)}s 内有修改,疑并发写入未定稿,防 spotless 写回覆盖丢更新,下回合复跑(mvn verify 兜底): ${inFlight.map(f => path.relative(ROOT, f)).join(', ')}`);
+  }
 
   const before = new Map(files.map(f => [f, fileHash(f)]));
   const r = run(mvn.cmd, ['-q', 'spotless:apply'], { timeoutMs: 600000, cwd: ROOT });
